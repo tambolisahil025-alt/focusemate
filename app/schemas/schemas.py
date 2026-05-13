@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, ConfigDict
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 class UserBase(BaseModel):
@@ -78,3 +78,40 @@ class DirectMessageResponse(BaseModel):
     sender_name: Optional[str] = None
     sender_avatar: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)
+
+# --- AI ASSISTANT SCHEMAS ---
+class AIMessage(BaseModel):
+    """Single message in AI chat"""
+    role: str  # 'user' or 'assistant'
+    content: str
+
+class AIChatRequest(BaseModel):
+    """Request for AI chat endpoint"""
+    message: str
+    chat_history: Optional[List[AIMessage]] = None
+    screen_name: Optional[str] = None
+    user_action: Optional[str] = None
+    app_context: Optional[Dict[str, Any]] = None
+
+class AIChatResponse(BaseModel):
+    """Response from AI chat endpoint"""
+    response: str
+    messages: List[AIMessage]
+    suggestions: Optional[List[str]] = None
+
+class AISuggestionsRequest(BaseModel):
+    """Request for AI suggestions"""
+    screen_name: str
+    user_action: Optional[str] = None
+    app_context: Optional[Dict[str, Any]] = None
+
+class AISuggestionsResponse(BaseModel):
+    """Response with AI suggestions"""
+    suggestions: List[str]
+
+class AIContextRequest(BaseModel):
+    """Current app context captured by the AI assistant"""
+    screen: Optional[str] = None
+    action: Optional[str] = None
+    data: Optional[Dict[str, Any]] = None
+    timestamp: Optional[str] = None
