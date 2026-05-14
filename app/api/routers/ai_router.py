@@ -6,10 +6,11 @@ Provides AI chat, suggestions, and context-aware help
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.schemas import schemas
-from app.api.deps import get_db, get_current_user
+from app.api.deps import get_db, get_optional_current_user
 from app.db import models
 from app.services.groq_service import get_groq_service
 import logging
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ def _ai_error_response(error: Exception) -> HTTPException:
 async def ai_chat(
     request: schemas.AIChatRequest,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    current_user: Optional[models.User] = Depends(get_optional_current_user),
 ):
     """
     Chat with AI assistant
@@ -60,6 +61,12 @@ async def ai_chat(
         })
         
         # Build system context
+        user_context = (
+            f"User: {current_user.name} (Level {current_user.level})"
+            if current_user
+            else "User: Guest"
+        )
+
         system_prompt = f"""You are FocuseMate AI Assistant, a helpful guide for a collaborative study platform.
 You help users:
 - Navigate the app
@@ -67,7 +74,7 @@ You help users:
 - Complete tasks
 - Answer questions about studying and collaboration
 
-User: {current_user.name} (Level {current_user.level})"""
+{user_context}"""
         
         if request.screen_name:
             system_prompt += f"\nCurrent Screen: {request.screen_name}"
@@ -125,7 +132,7 @@ User: {current_user.name} (Level {current_user.level})"""
 async def get_ai_suggestions(
     request: schemas.AISuggestionsRequest,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    current_user: Optional[models.User] = Depends(get_optional_current_user),
 ):
     """
     Get AI suggestions for current screen/action
@@ -159,7 +166,7 @@ async def get_screen_help(
     screen: str,
     feature: str = None,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    current_user: Optional[models.User] = Depends(get_optional_current_user),
 ):
     """
     Get contextual help for a screen
@@ -192,7 +199,7 @@ async def get_screen_help(
 async def save_app_context(
     context_data: schemas.AIContextRequest,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    current_user: Optional[models.User] = Depends(get_optional_current_user),
 ):
     """
     Save app context for AI assistant (for future personalization)
@@ -209,7 +216,8 @@ async def save_app_context(
         # This endpoint can be extended to store user interaction patterns
         # for better personalization in the future
         
-        logger.info(f"Context saved for user {current_user.id}: {context_data.model_dump(exclude_none=True)}")
+        user_label = current_user.id if current_user else "guest"
+        logger.info(f"Context saved for user {user_label}: {context_data.model_dump(exclude_none=True)}")
         
         return {
             "status": "success",
