@@ -5,12 +5,14 @@ def normalize_database_url(url: str) -> str:
         return url.replace("postgres://", "postgresql+psycopg2://", 1)
     if url.startswith("postgresql://"):
         return url.replace("postgresql://", "postgresql+psycopg2://", 1)
+    if url.startswith("postgresql+asyncpg://"):
+        return url.replace("postgresql+asyncpg://", "postgresql+psycopg2://", 1)
     return url
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "FocuseMate API"
     
-    DATABASE_URL: str = "postgresql+asyncpg://postgres.lrtvogsxuutgonvsendp:[Focusemate@025]@aws-1-ap-southeast-2.pooler.supabase.com:6543/postgres"
+    DATABASE_URL: str = "postgresql+psycopg2://postgres.lrtvogsxuutgonvsendp:Focusemate%40025@aws-1-ap-southeast-2.pooler.supabase.com:6543/postgres"
     
     SECRET_KEY: str = "generate_a_super_secret_random_string_here"
     ALGORITHM: str = "HS256"

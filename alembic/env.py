@@ -18,7 +18,7 @@ from app.db.models import Base
 config = context.config
 
 # 3. Force Alembic to use the DATABASE_URL from your .env file!
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+config.set_main_option("sqlalchemy.url", settings.database_url)
 
 # Interpret the config file for Python logging.
 if config.config_file_name is not None:
