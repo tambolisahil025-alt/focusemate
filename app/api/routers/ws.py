@@ -1,18 +1,21 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
+import json
+from typing import Dict, List
+
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException
 from jose import jwt, JWTError
 from sqlalchemy.orm import Session
-from typing import Dict, List
+from pydantic import BaseModel
+
 from app.db.database import SessionLocal
 from app.core.config import settings
 from app.db import models
-import json
-from fastapi import Depends, HTTPException
-from sqlalchemy.orm import Session
-from pydantic import BaseModel
 from app.api.deps import get_db, get_current_user
 
 router = APIRouter(tags=["websockets"])
 
+# ---------------------------------------------------------
+# Connection Manager
+# ---------------------------------------------------------
 class ConnectionManager:
     def __init__(self):
         # Maps room_id -> list of active WebSockets
@@ -65,6 +68,9 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+# ---------------------------------------------------------
+# Authentication Helper
+# ---------------------------------------------------------
 def get_user_from_token(token: str):
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
@@ -78,6 +84,9 @@ def get_user_from_token(token: str):
     except JWTError:
         return None
 
+# ---------------------------------------------------------
+# WebSocket Routes
+# ---------------------------------------------------------
 @router.websocket("/ws/rooms/{room_id}")
 async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
     user = get_user_from_token(token)
@@ -121,7 +130,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
                         "sender_avatar": user.avatar,
                         "content": new_msg.content,
                         "message_type": "text",
-                        "created_at": new_msg.created_at.isoformat()
+                        "created_at": new_msg.created_at.isoformat() if new_msg.created_at else None
                     }
                 }
                 db.close()
@@ -206,14 +215,17 @@ async def direct_message_websocket(websocket: WebSocket, token: str):
                 db.close()
     except WebSocketDisconnect:
         manager.disconnect_direct(websocket, user.id)
-# --- ADD THESE TO THE BOTTOM OF ws.py ---
 
+# ---------------------------------------------------------
+# REST API Routes
+# ---------------------------------------------------------
 class MessageCreate(BaseModel):
     room_id: int
     content: str
     message_type: str = "text"
 
-@router.get("/messages/room/{room_id}")
+# NOTE: operation_id added here to fix Uvicorn duplicate warnings
+@router.get("/messages/room/{room_id}", operation_id="fetch_room_messages")
 def get_room_messages(
     room_id: int, 
     limit: int = 100, 
@@ -221,7 +233,6 @@ def get_room_messages(
     db: Session = Depends(get_db), 
     current_user: models.User = Depends(get_current_user)
 ):
-    # Fetch messages ordered by newest first, then paginate
     messages = db.query(models.Message).filter(
         models.Message.room_id == room_id
     ).order_by(models.Message.created_at.desc()).offset(offset).limit(limit).all()
@@ -243,7 +254,8 @@ def get_room_messages(
         })
     return {"messages": result}
 
-@router.post("/messages/")
+# NOTE: operation_id added here to fix Uvicorn duplicate warnings
+@router.post("/messages/", operation_id="post_new_message")
 def create_message(
     payload: MessageCreate, 
     db: Session = Depends(get_db), 
@@ -268,4 +280,4 @@ def create_message(
         "content": new_msg.content,
         "message_type": new_msg.message_type,
         "created_at": new_msg.created_at.isoformat() if new_msg.created_at else None
-    }        
+    }

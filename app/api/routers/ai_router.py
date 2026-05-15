@@ -19,10 +19,13 @@ router = APIRouter(prefix="/ai", tags=["ai-assistant"])
 
 def _ai_error_response(error: Exception) -> HTTPException:
     message = str(error)
-    if "GROQ_API_KEY" in message:
+    normalized = message.lower()
+    if "groq_api_key" in normalized or "not set" in normalized or "invalid key" in normalized:
         return HTTPException(status_code=503, detail="AI service is not configured")
-    if "timeout" in message.lower():
+    if "timeout" in normalized:
         return HTTPException(status_code=504, detail="AI service timed out")
+    if "401" in normalized or "403" in normalized or "unauthorized" in normalized:
+        return HTTPException(status_code=503, detail="AI service is not configured")
     return HTTPException(status_code=502, detail="AI service is temporarily unavailable")
 
 
@@ -124,7 +127,7 @@ You help users:
         )
     
     except Exception as e:
-        logger.error(f"AI chat error: {str(e)}")
+        logger.exception(f"AI chat error: {str(e)}")
         raise _ai_error_response(e)
 
 
@@ -157,7 +160,7 @@ async def get_ai_suggestions(
         return schemas.AISuggestionsResponse(suggestions=suggestions)
     
     except Exception as e:
-        logger.error(f"AI suggestions error: {str(e)}")
+        logger.exception(f"AI suggestions error: {str(e)}")
         raise _ai_error_response(e)
 
 
@@ -191,7 +194,7 @@ async def get_screen_help(
         return {"help": help_text, "screen": screen}
     
     except Exception as e:
-        logger.error(f"AI help error: {str(e)}")
+        logger.exception(f"AI help error: {str(e)}")
         raise _ai_error_response(e)
 
 

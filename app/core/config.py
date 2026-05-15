@@ -12,7 +12,7 @@ def normalize_database_url(url: str) -> str:
 class Settings(BaseSettings):
     PROJECT_NAME: str = "FocuseMate API"
     
-    DATABASE_URL: str = "postgresql+psycopg2://postgres.lrtvogsxuutgonvsendp:Focusemate%40025@aws-1-ap-southeast-2.pooler.supabase.com:6543/postgres"
+    DATABASE_URL: str = "postgresql+psycopg2://postgres.lrtvogsxuutgonvsendp:novaminds06071819@aws-1-ap-southeast-2.pooler.supabase.com:6543/postgres"
     
     SECRET_KEY: str = "generate_a_super_secret_random_string_here"
     ALGORITHM: str = "HS256"

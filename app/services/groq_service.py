@@ -17,7 +17,7 @@ class GroqService:
     """Service for interacting with GROQ AI API"""
     
     BASE_URL = "https://api.groq.com/openai/v1"
-    MODEL = "llama3-70b-8192"
+    MODEL = "llama-3.3-70b-versatile"
     DEFAULT_TIMEOUT = 30.0
     MAX_RETRIES = 3
     
@@ -63,18 +63,20 @@ class GroqService:
             raise Exception(f"GROQ API timeout after {self.MAX_RETRIES} retries")
         
         except httpx.HTTPStatusError as e:
-            logger.error(f"GROQ API error: {e.response.status_code} - {e.response.text}")
-            if e.response.status_code == 429 and retry_count < self.MAX_RETRIES:  # Rate limit
+            status_code = e.response.status_code
+            response_text = e.response.text or ""
+            logger.error(f"GROQ API error: {status_code} - {response_text}")
+            if status_code == 429 and retry_count < self.MAX_RETRIES:  # Rate limit
                 await asyncio.sleep(2 ** (retry_count + 1))
                 return await self._make_request(endpoint, method, data, timeout, retry_count + 1)
-            raise Exception(f"GROQ API error: {e.response.status_code}")
+            raise Exception(f"GROQ API error: {status_code} - {response_text}")
 
         except httpx.RequestError as e:
             logger.error(f"GROQ network error: {str(e)}")
             if retry_count < self.MAX_RETRIES:
                 await asyncio.sleep(2 ** retry_count)
                 return await self._make_request(endpoint, method, data, timeout, retry_count + 1)
-            raise Exception("GROQ API network error")
+            raise Exception(f"GROQ API network error: {str(e)}")
         
         except Exception as e:
             logger.error(f"GROQ service error: {str(e)}")

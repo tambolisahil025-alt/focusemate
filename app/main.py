@@ -7,24 +7,6 @@ from app.api.routers import auth, rooms, ws, users, features, messages, ai_route
 
 from app.core.config import settings
 import os
-from sqlalchemy import inspect, text
-
-from app.db.database import engine
-from app.db import models
-models.Base.metadata.create_all(bind=engine)
-
-def ensure_compatible_schema():
-    inspector = inspect(engine)
-    if "notifications" in inspector.get_table_names():
-        notification_columns = {col["name"] for col in inspector.get_columns("notifications")}
-        if "actor_id" not in notification_columns:
-            with engine.begin() as conn:
-                conn.execute(text("ALTER TABLE notifications ADD COLUMN actor_id INTEGER"))
-        if "room_id" not in notification_columns:
-            with engine.begin() as conn:
-                conn.execute(text("ALTER TABLE notifications ADD COLUMN room_id INTEGER"))
-
-ensure_compatible_schema()
 
 app = FastAPI(title=settings.PROJECT_NAME)
 
