@@ -1,7 +1,10 @@
 import json
-from typing import Dict, List
+import os
+import shutil
+import uuid
+from typing import Dict, List, Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, UploadFile, File, Form, Request
 from jose import jwt, JWTError
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -12,6 +15,9 @@ from app.db import models
 from app.api.deps import get_db, get_current_user
 
 router = APIRouter(tags=["websockets"])
+
+UPLOAD_DIR = "uploads/messages"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # ---------------------------------------------------------
 # Connection Manager
@@ -66,6 +72,17 @@ class ConnectionManager:
             for connection in stale:
                 self.disconnect_direct(connection, user_id)
 
+    async def broadcast_all_direct(self, message: dict):
+        stale = []
+        for user_id, connections in list(self.direct_connections.items()):
+            for connection in list(connections):
+                try:
+                    await connection.send_json(message)
+                except Exception:
+                    stale.append((connection, user_id))
+        for connection, user_id in stale:
+            self.disconnect_direct(connection, user_id)
+
 manager = ConnectionManager()
 
 # ---------------------------------------------------------
@@ -110,11 +127,12 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
             
             if message_data.get("type") == "chat_message":
                 db = SessionLocal()
+                message_type = message_data.get("message_type") or "text"
                 new_msg = models.Message(
                     room_id=room_id,
                     sender_id=user.id,
                     content=message_data.get("content"),
-                    message_type="text"
+                    message_type=message_type
                 )
                 db.add(new_msg)
                 db.commit()
@@ -129,7 +147,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
                         "sender_name": user.name,
                         "sender_avatar": user.avatar,
                         "content": new_msg.content,
-                        "message_type": "text",
+                        "message_type": message_type,
                         "created_at": new_msg.created_at.isoformat() if new_msg.created_at else None
                     }
                 }
@@ -159,6 +177,11 @@ async def direct_message_websocket(websocket: WebSocket, token: str):
         return
 
     await manager.connect_direct(websocket, user.id)
+    await manager.broadcast_all_direct({
+        "type": "presence",
+        "user_id": user.id,
+        "status": "online"
+    })
 
     try:
         while True:
@@ -215,6 +238,11 @@ async def direct_message_websocket(websocket: WebSocket, token: str):
                 db.close()
     except WebSocketDisconnect:
         manager.disconnect_direct(websocket, user.id)
+        await manager.broadcast_all_direct({
+            "type": "presence",
+            "user_id": user.id,
+            "status": "offline"
+        })
 
 # ---------------------------------------------------------
 # REST API Routes
@@ -281,3 +309,28 @@ def create_message(
         "message_type": new_msg.message_type,
         "created_at": new_msg.created_at.isoformat() if new_msg.created_at else None
     }
+
+@router.post("/messages/attachments/")
+async def upload_message_attachment(
+    file: UploadFile = File(...),
+    room_id: Optional[int] = Form(None),
+    receiver_id: Optional[int] = Form(None),
+    message_type: str = Form("image"),
+    request: Request = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+    if not room_id and not receiver_id:
+        raise HTTPException(status_code=400, detail="room_id or receiver_id is required")
+
+    file_ext = file.filename.split('.')[-1]
+    file_name = f"{uuid.uuid4()}.{file_ext}"
+    file_path = os.path.join(UPLOAD_DIR, file_name)
+    with open(file_path, 'wb') as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    base_url = str(request.base_url).rstrip('/') if request else ''
+    file_url = f"{base_url}/static/messages/{file_name}"
+    return {"file_url": file_url, "message_type": message_type}

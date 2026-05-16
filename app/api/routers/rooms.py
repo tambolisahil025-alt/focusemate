@@ -1,14 +1,19 @@
-from fastapi import APIRouter, Depends, HTTPException
+import os
+import shutil
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from typing import List
+from typing import List, Optional
 from app.db import models
 from app.schemas import schemas
 from app.api.deps import get_db, get_current_user
 import uuid
 from pydantic import BaseModel
-from typing import Optional
+
 router = APIRouter(prefix="/rooms", tags=["rooms"])
+
+UPLOAD_DIR = "uploads/resources"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @router.post("/", response_model=schemas.RoomResponse)
 def create_room(room: schemas.RoomCreate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
@@ -154,7 +159,44 @@ def get_room_members(room_id: int, db: Session = Depends(get_db)):
 def get_room_resources(room_id: int, db: Session = Depends(get_db)):
     resources = db.query(models.Resource).filter(models.Resource.room_id == room_id).all()
     return resources
-# --- ADD THIS TO THE BOTTOM OF rooms.py ---
+
+@router.post("/{room_id}/resources/upload")
+async def upload_room_resource(
+    room_id: int,
+    title: str = Form(...),
+    description: Optional[str] = Form(None),
+    resource_type: str = Form("image"),
+    file: UploadFile = File(...),
+    request: Request = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    room = db.query(models.Room).filter(models.Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    file_ext = file.filename.split('.')[-1] if file.filename else 'bin'
+    file_name = f"{uuid.uuid4()}.{file_ext}"
+    file_path = os.path.join(UPLOAD_DIR, file_name)
+    with open(file_path, 'wb') as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    base_url = str(request.base_url).rstrip('/') if request else ''
+    resource_url = f"{base_url}/static/resources/{file_name}"
+
+    new_resource = models.Resource(
+        room_id=room_id,
+        added_by_id=current_user.id,
+        title=title,
+        description=description,
+        resource_type=resource_type,
+        link=resource_url
+    )
+    db.add(new_resource)
+    db.commit()
+    db.refresh(new_resource)
+
+    return new_resource
 
 @router.post("/{room_id}/meeting")
 def create_room_meeting(room_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
