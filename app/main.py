@@ -6,11 +6,18 @@ from fastapi.staticfiles import StaticFiles
 from app.api.routers import auth, rooms, ws, users, features, messages, ai_router 
 
 from app.core.config import settings
+from app.db.database import engine
+from app.db.models import Base
 import os
     
 # Create database tables
 
 app = FastAPI(title=settings.PROJECT_NAME)
+
+
+@app.on_event("startup")
+def create_missing_tables() -> None:
+    Base.metadata.create_all(bind=engine)
 
 app.add_middleware(
     CORSMiddleware,
