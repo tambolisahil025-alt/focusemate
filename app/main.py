@@ -6,12 +6,9 @@ from fastapi.staticfiles import StaticFiles
 from app.api.routers import auth, rooms, ws, users, features, messages, ai_router 
 
 from app.core.config import settings
-from app.db.session import engine
-from app import models
 import os
     
 # Create database tables
-models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title=settings.PROJECT_NAME)
 
