@@ -5,6 +5,7 @@ from pydantic import BaseModel
 import os
 import uuid
 import shutil
+import mimetypes
 
 from app.db import models
 from app.schemas import schemas
@@ -37,7 +38,7 @@ def update_user_me(
     if payload.bio is not None:
         current_user.bio = payload.bio
     if payload.avatar is not None:
-        current_user.avatar = payload.avatar
+        current_user.avatar = payload.avatar or None
         
     db.commit()
     db.refresh(current_user)
@@ -46,14 +47,18 @@ def update_user_me(
 @router.post("/me/avatar")
 async def upload_avatar(
     file: UploadFile = File(...),
+    request: Request = None,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
+    if file.content_type and not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Profile photo must be an image")
 
     # Generate a unique filename to avoid overwrites
-    file_ext = file.filename.split(".")[-1]
+    guessed_ext = mimetypes.guess_extension(file.content_type or "") if file.content_type else None
+    file_ext = (guessed_ext or f".{file.filename.split('.')[-1] if '.' in file.filename else 'jpg'}").lstrip(".")
     file_name = f"{uuid.uuid4()}.{file_ext}"
     file_path = os.path.join(UPLOAD_DIR, file_name)
     
@@ -61,7 +66,7 @@ async def upload_avatar(
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
         
-    base_url = settings.api_base_url
+    base_url = str(request.base_url).rstrip('/') if request else settings.api_base_url
     avatar_url = f"{base_url}/static/avatars/{file_name}"
     
     current_user.avatar = avatar_url

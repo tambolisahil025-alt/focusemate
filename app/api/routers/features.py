@@ -218,15 +218,22 @@ def handle_invitation(invitation_id: int, payload: InvitationAction, db: Session
             db.commit()
             raise HTTPException(status_code=404, detail="Room no longer exists")
 
+        requester_member = db.query(models.RoomMember).filter(
+            models.RoomMember.room_id == invitation.room_id,
+            models.RoomMember.user_id == invitation.inviter_id
+        ).first()
+        is_join_request = room.owner_id == current_user.id and not requester_member
+        target_user_id = invitation.inviter_id if is_join_request else current_user.id
+
         existing_member = db.query(models.RoomMember).filter(
             models.RoomMember.room_id == invitation.room_id,
-            models.RoomMember.user_id == current_user.id
+            models.RoomMember.user_id == target_user_id
         ).first()
         if not existing_member:
             member_count = db.query(models.RoomMember).filter(models.RoomMember.room_id == invitation.room_id).count()
             if member_count >= room.max_members:
                 raise HTTPException(status_code=400, detail="Room is full")
-            db.add(models.RoomMember(room_id=invitation.room_id, user_id=current_user.id, role="member"))
+            db.add(models.RoomMember(room_id=invitation.room_id, user_id=target_user_id, role="member"))
         invitation.status = "accepted"
     else:
         invitation.status = "rejected"
@@ -356,11 +363,18 @@ def send_direct_message(
     if not receiver:
         raise HTTPException(status_code=404, detail="Recipient not found")
 
+    content_to_store = message.content
+    message_type = message.message_type
+    if message.reply_to:
+        import json
+        content_to_store = json.dumps({"reply_to": int(message.reply_to), "text": message.content})
+        message_type = "reply"
+
     new_msg = models.DirectMessage(
         sender_id=current_user.id,
         receiver_id=message.receiver_id,
-        content=message.content,
-        message_type=message.message_type
+        content=content_to_store,
+        message_type=message_type
     )
     db.add(new_msg)
     db.commit()
@@ -380,7 +394,8 @@ def send_direct_message(
     return {
         **new_msg.__dict__,
         "sender_name": current_user.name,
-        "sender_avatar": current_user.avatar
+        "sender_avatar": current_user.avatar,
+        "reply_to": message.reply_to
     }
 
 @router.get("/messages/direct/{recipient_id}")
@@ -408,12 +423,25 @@ def get_direct_messages(
             sender_name = sender.name if sender else "Unknown User"
             sender_avatar = sender.avatar if sender else None
 
+        content = msg.content
+        reply_to = None
+        if msg.message_type == "reply":
+            try:
+                import json
+                parsed = json.loads(msg.content)
+                if isinstance(parsed, dict):
+                    reply_to = parsed.get("reply_to")
+                    content = parsed.get("text") or msg.content
+            except Exception:
+                pass
+
         response.append({
             "id": msg.id,
             "sender_id": msg.sender_id,
             "receiver_id": msg.receiver_id,
-            "content": msg.content,
+            "content": content,
             "message_type": msg.message_type,
+            "reply_to": reply_to,
             "created_at": msg.created_at,
             "sender_name": sender_name,
             "sender_avatar": sender_avatar

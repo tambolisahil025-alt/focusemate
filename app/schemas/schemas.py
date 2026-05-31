@@ -59,6 +59,7 @@ class MessageResponse(BaseModel):
     sender_avatar: Optional[str]
     content: str
     message_type: str
+    reply_to: Optional[int] = None
     created_at: datetime
     model_config = ConfigDict(from_attributes=True)
 
@@ -67,6 +68,7 @@ class DirectMessageCreate(BaseModel):
     receiver_id: int
     content: str
     message_type: str = "text"
+    reply_to: Optional[int] = None
 
 class DirectMessageResponse(BaseModel):
     id: int
@@ -77,6 +79,7 @@ class DirectMessageResponse(BaseModel):
     created_at: datetime
     sender_name: Optional[str] = None
     sender_avatar: Optional[str] = None
+    reply_to: Optional[int] = None
     model_config = ConfigDict(from_attributes=True)
 
 # --- AI ASSISTANT SCHEMAS ---

@@ -111,6 +111,16 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
         await websocket.close(code=1008)
         return
 
+    db = SessionLocal()
+    membership = db.query(models.RoomMember).filter(
+        models.RoomMember.room_id == room_id,
+        models.RoomMember.user_id == user.id
+    ).first()
+    db.close()
+    if not membership:
+        await websocket.close(code=1008)
+        return
+
     await manager.connect(websocket, room_id)
     
     # Notify room user joined
@@ -128,10 +138,15 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
             if message_data.get("type") == "chat_message":
                 db = SessionLocal()
                 message_type = message_data.get("message_type") or "text"
+                content_to_store = message_data.get("content")
+                reply_to = message_data.get("reply_to")
+                if reply_to:
+                    content_to_store = json.dumps({"reply_to": int(reply_to), "text": content_to_store})
+                    message_type = "reply"
                 new_msg = models.Message(
                     room_id=room_id,
                     sender_id=user.id,
-                    content=message_data.get("content"),
+                    content=content_to_store,
                     message_type=message_type
                 )
                 db.add(new_msg)
@@ -146,8 +161,9 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
                         "sender_id": user.id,
                         "sender_name": user.name,
                         "sender_avatar": user.avatar,
-                        "content": new_msg.content,
+                        "content": message_data.get("content"),
                         "message_type": message_type,
+                        "reply_to": reply_to,
                         "created_at": new_msg.created_at.isoformat() if new_msg.created_at else None
                     }
                 }
@@ -203,8 +219,8 @@ async def direct_message_websocket(websocket: WebSocket, token: str):
                 new_msg = models.DirectMessage(
                     sender_id=user.id,
                     receiver_id=receiver.id,
-                    content=content,
-                    message_type=payload.get("message_type") or "text"
+                    content=json.dumps({"reply_to": int(payload.get("reply_to")), "text": content}) if payload.get("reply_to") else content,
+                    message_type="reply" if payload.get("reply_to") else (payload.get("message_type") or "text")
                 )
                 db.add(new_msg)
                 db.commit()
@@ -227,8 +243,9 @@ async def direct_message_websocket(websocket: WebSocket, token: str):
                         "id": new_msg.id,
                         "sender_id": user.id,
                         "receiver_id": receiver.id,
-                        "content": new_msg.content,
+                        "content": content,
                         "message_type": new_msg.message_type,
+                        "reply_to": payload.get("reply_to"),
                         "created_at": new_msg.created_at.isoformat() if new_msg.created_at else None,
                         "sender_name": user.name,
                         "sender_avatar": user.avatar

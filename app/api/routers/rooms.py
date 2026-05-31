@@ -15,6 +15,25 @@ router = APIRouter(prefix="/rooms", tags=["rooms"])
 UPLOAD_DIR = "uploads/resources"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+class JoinRequestAction(BaseModel):
+    action: str
+
+def get_room_member(db: Session, room_id: int, user_id: int):
+    return db.query(models.RoomMember).filter(
+        models.RoomMember.room_id == room_id,
+        models.RoomMember.user_id == user_id
+    ).first()
+
+def require_room_member(db: Session, room_id: int, user_id: int):
+    membership = get_room_member(db, room_id, user_id)
+    if not membership:
+        raise HTTPException(status_code=403, detail="You are not a member of this room")
+    return membership
+
+def require_room_owner(room: models.Room, current_user: models.User):
+    if room.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the room owner can perform this action")
+
 @router.post("/", response_model=schemas.RoomResponse)
 def create_room(room: schemas.RoomCreate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     new_room = models.Room(**room.model_dump(), owner_id=current_user.id)
@@ -49,17 +68,122 @@ def join_room(room_id: int, db: Session = Depends(get_db), current_user: models.
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
         
-    existing = db.query(models.RoomMember).filter(
-        models.RoomMember.room_id == room_id, 
-        models.RoomMember.user_id == current_user.id
-    ).first()
-    if existing:
+    # Public joining is disabled. Users must send a join request which the room owner can approve.
+    raise HTTPException(status_code=400, detail="Direct joining is disabled. Send a join request instead.")
+
+
+@router.post("/{room_id}/request_join")
+def request_join_room(room_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    room = db.query(models.Room).filter(models.Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    existing_member = get_room_member(db, room_id, current_user.id)
+    if existing_member:
         raise HTTPException(status_code=400, detail="Already a member")
-        
-    member = models.RoomMember(room_id=room_id, user_id=current_user.id, role="member")
-    db.add(member)
+
+    member_count = db.query(models.RoomMember).filter(models.RoomMember.room_id == room_id).count()
+    if member_count >= room.max_members:
+        raise HTTPException(status_code=400, detail="Room is full")
+
+    # Check for an existing pending invitation/request
+    existing_invite = db.query(models.Invitation).filter(
+        models.Invitation.room_id == room_id,
+        models.Invitation.inviter_id == current_user.id,
+        models.Invitation.status == "pending"
+    ).first()
+    if existing_invite:
+        raise HTTPException(status_code=400, detail="Join request already sent")
+
+    invitation = models.Invitation(room_id=room_id, inviter_id=current_user.id, invitee_id=room.owner_id, status="pending")
+    db.add(invitation)
+    # Notify owner
+    notification = models.Notification(
+        user_id=room.owner_id,
+        notification_type="room_invite",
+        title="Join Request",
+        body=f"{current_user.name} requested to join '{room.title}'",
+        actor_id=current_user.id,
+        actor_name=current_user.name,
+        room_id=room.id
+    )
+    db.add(notification)
     db.commit()
-    return {"detail": "Successfully joined"}
+    db.refresh(invitation)
+    return {"detail": "Join request sent"}
+
+@router.get("/{room_id}/join_requests")
+def get_room_join_requests(room_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    room = db.query(models.Room).filter(models.Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    require_room_owner(room, current_user)
+
+    requests = db.query(models.Invitation).filter(
+        models.Invitation.room_id == room_id,
+        models.Invitation.invitee_id == current_user.id,
+        models.Invitation.status == "pending"
+    ).all()
+    result = []
+    for req in requests:
+        requester = db.query(models.User).filter(models.User.id == req.inviter_id).first()
+        if requester:
+            result.append({
+                "id": req.id,
+                "room_id": req.room_id,
+                "requester_id": requester.id,
+                "requester_name": requester.name,
+                "requester_email": requester.email,
+                "requester_avatar": requester.avatar,
+                "created_at": req.created_at,
+            })
+    return {"requests": result}
+
+@router.post("/{room_id}/join_requests/{request_id}")
+def handle_room_join_request(room_id: int, request_id: int, payload: JoinRequestAction, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    room = db.query(models.Room).filter(models.Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    require_room_owner(room, current_user)
+
+    join_request = db.query(models.Invitation).filter(
+        models.Invitation.id == request_id,
+        models.Invitation.room_id == room_id,
+        models.Invitation.invitee_id == current_user.id,
+        models.Invitation.status == "pending"
+    ).first()
+    if not join_request:
+        raise HTTPException(status_code=404, detail="Join request not found")
+
+    action = payload.action.lower()
+    if action not in ["approve", "accept", "deny", "reject", "decline"]:
+        raise HTTPException(status_code=400, detail="Action must be approve or deny")
+
+    if action in ["approve", "accept"]:
+        member_count = db.query(models.RoomMember).filter(models.RoomMember.room_id == room_id).count()
+        if member_count >= room.max_members:
+            raise HTTPException(status_code=400, detail="Room is full")
+        if not get_room_member(db, room_id, join_request.inviter_id):
+            db.add(models.RoomMember(room_id=room_id, user_id=join_request.inviter_id, role="member"))
+        join_request.status = "accepted"
+        title = "Join Request Approved"
+        body = f"Your request to join '{room.title}' was approved."
+    else:
+        join_request.status = "rejected"
+        title = "Join Request Denied"
+        body = f"Your request to join '{room.title}' was denied."
+
+    db.add(models.Notification(
+        user_id=join_request.inviter_id,
+        notification_type="room_invite",
+        title=title,
+        body=body,
+        actor_id=current_user.id,
+        actor_name=current_user.name,
+        room_id=room.id
+    ))
+    db.commit()
+    return {"status": join_request.status, "room_id": room_id}
 
 @router.post("/{room_id}/leave")
 def leave_room(room_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
@@ -81,8 +205,7 @@ def update_room(room_id: int, payload: schemas.RoomUpdate, db: Session = Depends
     room = db.query(models.Room).filter(models.Room.id == room_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
-    if room.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Only the room owner can update this room")
+    require_room_owner(room, current_user)
 
     updates = payload.model_dump(exclude_unset=True)
     if "title" in updates:
@@ -90,6 +213,10 @@ def update_room(room_id: int, payload: schemas.RoomUpdate, db: Session = Depends
             raise HTTPException(status_code=400, detail="Room title is required")
     if "max_members" in updates and (updates["max_members"] is None or updates["max_members"] < 1):
         raise HTTPException(status_code=400, detail="Max members must be at least 1")
+    if "max_members" in updates and updates["max_members"] is not None:
+        member_count = db.query(models.RoomMember).filter(models.RoomMember.room_id == room_id).count()
+        if updates["max_members"] < member_count:
+            raise HTTPException(status_code=400, detail="Max members cannot be lower than current member count")
 
     for key, value in updates.items():
         if key == "title" and isinstance(value, str):
@@ -107,8 +234,7 @@ def delete_room(room_id: int, db: Session = Depends(get_db), current_user: model
     room = db.query(models.Room).filter(models.Room.id == room_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
-    if room.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Only the room owner can delete this room")
+    require_room_owner(room, current_user)
 
     db.query(models.Invitation).filter(models.Invitation.room_id == room_id).delete(synchronize_session=False)
     db.delete(room)
@@ -117,27 +243,51 @@ def delete_room(room_id: int, db: Session = Depends(get_db), current_user: model
 # --- ADD THESE TO THE BOTTOM OF rooms.py ---
 
 @router.get("/")
-def get_all_rooms(db: Session = Depends(get_db)):
+def get_all_rooms(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     rooms = db.query(models.Room).all()
     result = []
     for room in rooms:
         member_count = db.query(models.RoomMember).filter(models.RoomMember.room_id == room.id).count()
         setattr(room, 'member_count', member_count)
-        result.append(room)
+        membership = get_room_member(db, room.id, current_user.id)
+        pending_request = db.query(models.Invitation).filter(
+            models.Invitation.room_id == room.id,
+            models.Invitation.inviter_id == current_user.id,
+            models.Invitation.invitee_id == room.owner_id,
+            models.Invitation.status == "pending"
+        ).first()
+        item = schemas.RoomResponse.model_validate(room).model_dump()
+        item["is_member"] = bool(membership)
+        item["join_request_pending"] = bool(pending_request)
+        item["is_full"] = member_count >= room.max_members
+        result.append(item)
     return result
 
 @router.get("/{room_id}")
-def get_room(room_id: int, db: Session = Depends(get_db)):
+def get_room(room_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     room = db.query(models.Room).filter(models.Room.id == room_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
-    
+
+    # Only allow viewing room details if the user is a member or the owner
+    membership = get_room_member(db, room_id, current_user.id)
+    if not membership and room.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You do not have access to view this room")
+
     member_count = db.query(models.RoomMember).filter(models.RoomMember.room_id == room_id).count()
     setattr(room, 'member_count', member_count)
     return room
 
 @router.get("/{room_id}/members/")
-def get_room_members(room_id: int, db: Session = Depends(get_db)):
+def get_room_members(room_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # Only room members or owner can list members
+    room = db.query(models.Room).filter(models.Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    membership = get_room_member(db, room_id, current_user.id)
+    if not membership and room.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You do not have access to view members for this room")
+
     members = db.query(models.RoomMember).filter(models.RoomMember.room_id == room_id).all()
     result = []
     for m in members:
@@ -156,7 +306,8 @@ def get_room_members(room_id: int, db: Session = Depends(get_db)):
     return result
 
 @router.get("/{room_id}/resources/")
-def get_room_resources(room_id: int, db: Session = Depends(get_db)):
+def get_room_resources(room_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    require_room_member(db, room_id, current_user.id)
     resources = db.query(models.Resource).filter(models.Resource.room_id == room_id).all()
     return resources
 
@@ -174,6 +325,7 @@ async def upload_room_resource(
     room = db.query(models.Room).filter(models.Room.id == room_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
+    require_room_member(db, room_id, current_user.id)
 
     file_ext = file.filename.split('.')[-1] if file.filename else 'bin'
     file_name = f"{uuid.uuid4()}.{file_ext}"
@@ -203,6 +355,7 @@ def create_room_meeting(room_id: int, db: Session = Depends(get_db), current_use
     room = db.query(models.Room).filter(models.Room.id == room_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
+    require_room_member(db, room_id, current_user.id)
 
     membership = db.query(models.RoomMember).filter(
         models.RoomMember.room_id == room_id,
@@ -246,6 +399,7 @@ def add_room_resource(
     room = db.query(models.Room).filter(models.Room.id == room_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
+    require_room_member(db, room_id, current_user.id)
         
     new_resource = models.Resource(
         room_id=room_id,
