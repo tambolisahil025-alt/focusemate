@@ -142,3 +142,48 @@ class DirectMessage(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     is_read = Column(Boolean, default=False)
     
+
+# Meetings and related models
+class Meeting(Base):
+    __tablename__ = "meetings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    room_id = Column(Integer, ForeignKey("rooms.id"), nullable=False)
+    host_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    jitsi_room = Column(String, nullable=False)
+    status = Column(String, default="lobby") # lobby, live, ended
+    auto_accept = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    ended_at = Column(DateTime(timezone=True), nullable=True)
+
+    participants = relationship("MeetingParticipant", back_populates="meeting", cascade="all, delete-orphan")
+    invitations = relationship("MeetingInvitation", back_populates="meeting", cascade="all, delete-orphan")
+
+class MeetingParticipant(Base):
+    __tablename__ = "meeting_participants"
+
+    id = Column(Integer, primary_key=True, index=True)
+    meeting_id = Column(Integer, ForeignKey("meetings.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    role = Column(String, default="participant") # host, participant
+    status = Column(String, default="pending") # pending, approved, rejected
+    joined_at = Column(DateTime(timezone=True), nullable=True)
+    left_at = Column(DateTime(timezone=True), nullable=True)
+    banned = Column(Boolean, default=False)
+
+    meeting = relationship("Meeting", back_populates="participants")
+
+class MeetingInvitation(Base):
+    __tablename__ = "meeting_invitations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    meeting_id = Column(Integer, ForeignKey("meetings.id"), nullable=False)
+    inviter_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    token_hash = Column(String, nullable=False, index=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used = Column(Boolean, default=False)
+    single_use = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    meeting = relationship("Meeting", back_populates="invitations")
+    

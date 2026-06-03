@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 # 1. ADD 'features' TO THIS IMPORT
-from app.api.routers import auth, rooms, ws, users, features, messages, ai_router 
+from app.api.routers import auth, rooms, ws, users, features, messages, ai_router, meetings
 
 from app.core.config import settings
 from app.db.database import engine
@@ -36,6 +36,9 @@ app.include_router(rooms.router)
 app.include_router(messages.router)
 app.include_router(ws.router)
 app.include_router(ai_router.router)
+
+# meetings router
+app.include_router(meetings.router)
 
 # 2. ADD THIS LINE
 app.include_router(features.router) 

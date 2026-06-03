@@ -27,6 +27,7 @@ class ConnectionManager:
         # Maps room_id -> list of active WebSockets
         self.active_connections: Dict[int, List[WebSocket]] = {}
         self.direct_connections: Dict[int, List[WebSocket]] = {}
+        self.meeting_connections: Dict[int, List[WebSocket]] = {}
 
     async def connect(self, websocket: WebSocket, room_id: int):
         await websocket.accept()
@@ -55,11 +56,23 @@ class ConnectionManager:
         await websocket.accept()
         self.direct_connections.setdefault(user_id, []).append(websocket)
 
+    async def connect_meeting(self, websocket: WebSocket, meeting_id: int):
+        await websocket.accept()
+        if meeting_id not in self.meeting_connections:
+            self.meeting_connections[meeting_id] = []
+        self.meeting_connections[meeting_id].append(websocket)
+
     def disconnect_direct(self, websocket: WebSocket, user_id: int):
         if user_id in self.direct_connections and websocket in self.direct_connections[user_id]:
             self.direct_connections[user_id].remove(websocket)
             if not self.direct_connections[user_id]:
                 del self.direct_connections[user_id]
+
+    def disconnect_meeting(self, websocket: WebSocket, meeting_id: int):
+        if meeting_id in self.meeting_connections and websocket in self.meeting_connections[meeting_id]:
+            self.meeting_connections[meeting_id].remove(websocket)
+            if not self.meeting_connections[meeting_id]:
+                del self.meeting_connections[meeting_id]
 
     async def broadcast_direct(self, user_ids: List[int], message: dict):
         for user_id in user_ids:
@@ -71,6 +84,17 @@ class ConnectionManager:
                     stale.append(connection)
             for connection in stale:
                 self.disconnect_direct(connection, user_id)
+
+    async def broadcast_to_meeting(self, meeting_id: int, message: dict):
+        if meeting_id in self.meeting_connections:
+            stale = []
+            for connection in list(self.meeting_connections[meeting_id]):
+                try:
+                    await connection.send_json(message)
+                except Exception:
+                    stale.append(connection)
+            for connection in stale:
+                self.disconnect_meeting(connection, meeting_id)
 
     async def broadcast_all_direct(self, message: dict):
         stale = []
@@ -181,6 +205,55 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
         manager.disconnect(websocket, room_id)
         await manager.broadcast_to_room(room_id, {
             "type": "user_left",
+            "user_id": user.id,
+            "user_name": user.name
+        })
+
+
+@router.websocket("/ws/meetings/{meeting_id}")
+async def websocket_meeting(websocket: WebSocket, meeting_id: int, token: str):
+    user = get_user_from_token(token)
+    if not user:
+        await websocket.close(code=1008)
+        return
+
+    db = SessionLocal()
+    participant = db.query(models.MeetingParticipant).filter(
+        models.MeetingParticipant.meeting_id == meeting_id,
+        models.MeetingParticipant.user_id == user.id
+    ).first()
+    db.close()
+
+    # Only approved participants or host can join meeting WS; pending users are not allowed here
+    if not participant or participant.status != "approved" or participant.banned:
+        await websocket.close(code=1008)
+        return
+
+    await manager.connect_meeting(websocket, meeting_id)
+
+    await manager.broadcast_to_meeting(meeting_id, {
+        "type": "meeting_user_joined",
+        "user_id": user.id,
+        "user_name": user.name
+    })
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            data = json.loads(raw)
+            # Simple pass-through events for approved participants
+            if data.get("type") == "meeting_chat":
+                await manager.broadcast_to_meeting(meeting_id, {
+                    "type": "meeting_chat",
+                    "user_id": user.id,
+                    "user_name": user.name,
+                    "content": data.get("content")
+                })
+
+    except WebSocketDisconnect:
+        manager.disconnect_meeting(websocket, meeting_id)
+        await manager.broadcast_to_meeting(meeting_id, {
+            "type": "meeting_user_left",
             "user_id": user.id,
             "user_name": user.name
         })

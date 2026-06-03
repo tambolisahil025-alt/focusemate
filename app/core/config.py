@@ -29,6 +29,15 @@ class Settings(BaseSettings):
     # AI Assistant Configuration
     GROQ_API_KEY: str | None = None
 
+    # Jitsi configuration for self-hosted Jitsi with JWT auth
+    JITSI_APP_ID: str | None = None
+    JITSI_APP_SECRET: str | None = None
+    JITSI_ISSUER: str | None = None
+    JITSI_ALGORITHM: str = "HS256"
+    JITSI_TOKEN_TTL_SEC: int = 600
+    MEETING_INVITE_TTL_SEC: int = 86400
+    FRONTEND_APP_URL: str | None = None
+
     class Config:
         env_file = ".env"
 
