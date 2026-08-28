@@ -236,7 +236,24 @@ def delete_room(room_id: int, db: Session = Depends(get_db), current_user: model
         raise HTTPException(status_code=404, detail="Room not found")
     require_room_owner(room, current_user)
 
+    meeting_ids = [
+        meeting_id for (meeting_id,) in
+        db.query(models.Meeting.id).filter(models.Meeting.room_id == room_id).all()
+    ]
+    if meeting_ids:
+        db.query(models.MeetingInvitation).filter(
+            models.MeetingInvitation.meeting_id.in_(meeting_ids)
+        ).delete(synchronize_session=False)
+        db.query(models.MeetingParticipant).filter(
+            models.MeetingParticipant.meeting_id.in_(meeting_ids)
+        ).delete(synchronize_session=False)
+        db.query(models.Meeting).filter(models.Meeting.id.in_(meeting_ids)).delete(synchronize_session=False)
+
+    db.query(models.Notification).filter(models.Notification.room_id == room_id).delete(synchronize_session=False)
     db.query(models.Invitation).filter(models.Invitation.room_id == room_id).delete(synchronize_session=False)
+    db.query(models.Resource).filter(models.Resource.room_id == room_id).delete(synchronize_session=False)
+    db.query(models.Message).filter(models.Message.room_id == room_id).delete(synchronize_session=False)
+    db.query(models.RoomMember).filter(models.RoomMember.room_id == room_id).delete(synchronize_session=False)
     db.delete(room)
     db.commit()
     return {"detail": "Room deleted successfully"}
