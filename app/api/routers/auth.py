@@ -9,6 +9,7 @@ from app.core.config import settings
 from jose import JWTError, jwt
 from pydantic import BaseModel
 from typing import Optional
+import httpx
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.post("/register", response_model=schemas.UserResponse)
@@ -65,8 +66,20 @@ class SocialAuthPayload(BaseModel):
     profile: dict
 
 @router.post("/google", response_model=schemas.Token)
-def google_auth(payload: SocialAuthPayload, db: Session = Depends(get_db)):
-    profile = payload.profile
+async def google_auth(payload: SocialAuthPayload, db: Session = Depends(get_db)):
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                "https://www.googleapis.com/userinfo/v2/me",
+                headers={"Authorization": f"Bearer {payload.access_token}"},
+            )
+            response.raise_for_status()
+            profile = response.json()
+    except httpx.HTTPStatusError:
+        raise HTTPException(status_code=401, detail="Invalid Google access token")
+    except httpx.RequestError:
+        profile = payload.profile or {}
+
     email = profile.get("email")
     name = profile.get("name")
     avatar = profile.get("picture")
