@@ -12,7 +12,7 @@ def normalize_database_url(url: str) -> str:
 class Settings(BaseSettings):
     PROJECT_NAME: str = "FocuseMate API"
     
-    DATABASE_URL: str = "postgresql+psycopg2://postgres:postgres@localhost:5432/focusemate"
+    DATABASE_URL: str = ""
     
     SECRET_KEY: str = "generate_a_super_secret_random_string_here"
     ALGORITHM: str = "HS256"
@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     
     # AI Assistant Configuration
     GROQ_API_KEY: str | None = None
+    GROQ_MODEL: str = "openai/gpt-oss-120b"
 
     # Jitsi configuration for self-hosted Jitsi with JWT auth
     JITSI_APP_ID: str | None = None

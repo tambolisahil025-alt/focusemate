@@ -17,7 +17,7 @@ class GroqService:
     """Service for interacting with GROQ AI API"""
     
     BASE_URL = "https://api.groq.com/openai/v1"
-    MODEL = "llama-3.3-70b-versatile"
+    DEFAULT_MODEL = "openai/gpt-oss-120b"
     DEFAULT_TIMEOUT = 30.0
     MAX_RETRIES = 3
     
@@ -26,6 +26,7 @@ class GroqService:
         self.api_key = api_key or settings.GROQ_API_KEY
         if not self.api_key:
             raise ValueError("GROQ_API_KEY environment variable not set")
+        self.model = settings.GROQ_MODEL or self.DEFAULT_MODEL
         
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -117,7 +118,7 @@ class GroqService:
             })
         
         payload = {
-            "model": self.MODEL,
+            "model": self.model,
             "messages": formatted_messages,
             "temperature": temperature,
             "max_tokens": max_tokens,

@@ -22,6 +22,10 @@ def _ai_error_response(error: Exception) -> HTTPException:
     normalized = message.lower()
     if "groq_api_key" in normalized or "not set" in normalized or "invalid key" in normalized:
         return HTTPException(status_code=503, detail="AI service is not configured")
+    if "model" in normalized and ("decommissioned" in normalized or "deprecated" in normalized or "not found" in normalized):
+        return HTTPException(status_code=503, detail="AI model is unavailable. Update GROQ_MODEL on the backend.")
+    if "429" in normalized or "rate limit" in normalized:
+        return HTTPException(status_code=503, detail="AI service rate limit reached. Please try again later.")
     if "timeout" in normalized:
         return HTTPException(status_code=504, detail="AI service timed out")
     if "401" in normalized or "403" in normalized or "unauthorized" in normalized:
