@@ -1,13 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from uuid import uuid4
 
 from app.api.deps import get_db, get_current_user
 from app.db import models
-from app.services import jitsi_service
-from app.core.config import settings
 
 router = APIRouter(prefix="/meetings", tags=["meetings"])
 
@@ -23,8 +21,8 @@ def create_meeting(payload: dict = Body(...), db: Session = Depends(get_db), cur
         raise HTTPException(status_code=403, detail="Only room owner can create meetings")
 
     # create meeting record
-    jitsi_room_name = f"FocuseMate-{room_id}-{str(uuid4())[:8]}"
-    meeting = models.Meeting(room_id=room_id, host_id=current_user.id, jitsi_room=jitsi_room_name, auto_accept=bool(auto_accept))
+    meeting_code = f"{str(uuid4()).split('-')[0].upper()}-{str(uuid4()).split('-')[0][:3].upper()}"
+    meeting = models.Meeting(room_id=room_id, host_id=current_user.id, meeting_code=meeting_code, auto_accept=bool(auto_accept))
     db.add(meeting)
     db.commit()
     db.refresh(meeting)
@@ -34,9 +32,7 @@ def create_meeting(payload: dict = Body(...), db: Session = Depends(get_db), cur
     db.add(host_participant)
     db.commit()
 
-    manage_token = jitsi_service.create_manage_token(meeting.id, current_user.id)
-
-    return {"meeting_id": meeting.id, "jitsi_room": meeting.jitsi_room, "manage_token": manage_token}
+    return {"meeting_id": meeting.id, "meeting_code": meeting.meeting_code, "status": meeting.status, "host_id": meeting.host_id}
 
 
 @router.post("/{meeting_id}/invitations")
@@ -49,30 +45,44 @@ def generate_invitation(meeting_id: int, payload: dict = Body(...), db: Session 
     if meeting.host_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only host can generate invitations")
 
-    raw_token = jitsi_service.generate_invite_token(db, meeting_id, current_user.id, single_use=bool(single_use), expires_in=expires_in)
-    frontend = settings.FRONTEND_APP_URL or "myapp://"
-    invite_url = f"{frontend}/join?invite={raw_token}"
+    raw_token = uuid4().hex
+    expires_at = datetime.utcnow() + timedelta(seconds=expires_in or 86400)
+    db.add(models.MeetingInvitation(
+        meeting_id=meeting.id,
+        inviter_id=current_user.id,
+        token_hash=raw_token,
+        expires_at=expires_at,
+        single_use=single_use,
+    ))
+    db.commit()
+    invite_url = f"myapp://meeting/{meeting.meeting_code}?invite={raw_token}"
     return {"invite_url": invite_url, "expires_in": expires_in or settings.MEETING_INVITE_TTL_SEC}
 
 
 @router.post("/join-with-invite")
 def join_with_invite(payload: dict = Body(...), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     invite_token = payload.get('invite_token')
-    inv = jitsi_service.validate_and_consume_invite(db, invite_token)
+    inv = db.query(models.MeetingInvitation).filter(
+        models.MeetingInvitation.token_hash == invite_token,
+        models.MeetingInvitation.used == False,
+    ).first()
     if not inv:
         raise HTTPException(status_code=400, detail="Invalid or expired invite token")
+    if inv.expires_at and inv.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=400, detail="Invalid or expired invite token")
+    if inv.single_use:
+        inv.used = True
     meeting = db.query(models.Meeting).filter(models.Meeting.id == inv.meeting_id).first()
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
 
-    # if auto_accept, create participant and return jitsi token
+    # Approved participants can connect to the WebRTC signaling channel.
     if meeting.auto_accept:
         participant = models.MeetingParticipant(meeting_id=meeting.id, user_id=current_user.id, role="participant", status="approved", joined_at=datetime.utcnow())
         db.add(participant)
         db.commit()
         db.refresh(participant)
-        jitsi_token = jitsi_service.create_jitsi_jwt(current_user, meeting, moderator=False)
-        return {"jitsi_token": jitsi_token, "jitsi_room": meeting.jitsi_room}
+        return {"status": "approved", "meeting_id": meeting.id, "meeting_code": meeting.meeting_code, "host_id": meeting.host_id}
 
     # otherwise create pending participant and notify host via notification
     pending = models.MeetingParticipant(meeting_id=meeting.id, user_id=current_user.id, role="participant", status="pending")
@@ -102,8 +112,7 @@ def approve_join(meeting_id: int, payload: dict = Body(...), db: Session = Depen
     db.commit()
 
     user = db.query(models.User).filter(models.User.id == participant.user_id).first()
-    jitsi_token = jitsi_service.create_jitsi_jwt(user, meeting, moderator=False)
-    return {"jitsi_token": jitsi_token, "jitsi_room": meeting.jitsi_room}
+    return {"status": "approved", "meeting_id": meeting.id, "meeting_code": meeting.meeting_code, "host_id": meeting.host_id}
 
 
 @router.post("/{meeting_id}/reject")

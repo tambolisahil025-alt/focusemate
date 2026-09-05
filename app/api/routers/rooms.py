@@ -1,5 +1,6 @@
 import os
 import shutil
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -380,19 +381,19 @@ def create_room_meeting(room_id: int, db: Session = Depends(get_db), current_use
     ).first()
     if not membership:
         raise HTTPException(status_code=403, detail="Join the room before creating a meeting")
+    if membership.role not in {"owner", "admin"}:
+        raise HTTPException(status_code=403, detail="Only a room owner or admin can create meetings")
         
-    # Generate a unique video meeting link (using Jitsi for free, instant web calls)
-    # You can swap this with your Agora RTC link/token logic later!
-    unique_meeting_id = f"FocuseMate-{room_id}-{uuid.uuid4().hex[:8]}"
-    meeting_link = f"https://meet.jit.si/{unique_meeting_id}"
-    
-    room.meeting_link = meeting_link
-    room.is_live = True  # Lights up the "LIVE" badge in your app!
-    
+    meeting_code = f"{uuid.uuid4().hex[:8].upper()}-{uuid.uuid4().hex[:3].upper()}"
+    meeting = models.Meeting(room_id=room_id, host_id=current_user.id, meeting_code=meeting_code, status="live", auto_accept=True)
+    db.add(meeting)
+    db.flush()
+    db.add(models.MeetingParticipant(meeting_id=meeting.id, user_id=current_user.id, role="host", status="approved", joined_at=datetime.utcnow()))
     db.commit()
-    db.refresh(room)
-    
-    return {"meeting_link": meeting_link}
+    db.refresh(meeting)
+    room.is_live = True
+    db.commit()
+    return {"meeting_id": meeting.id, "meeting_code": meeting.meeting_code, "status": meeting.status, "host_id": meeting.host_id}
 # --- ADD THESE TO THE BOTTOM OF rooms.py ---
 
 # 1. Define what the incoming resource data looks like

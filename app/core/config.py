@@ -10,7 +10,7 @@ def normalize_database_url(url: str) -> str:
     return url
 
 class Settings(BaseSettings):
-    PROJECT_NAME: str = "FocuseMate API"
+    PROJECT_NAME: str = "StudySpace API"
     
     DATABASE_URL: str = ""
     
@@ -30,12 +30,6 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str | None = None
     GROQ_MODEL: str = "openai/gpt-oss-120b"
 
-    # Jitsi configuration for self-hosted Jitsi with JWT auth
-    JITSI_APP_ID: str | None = None
-    JITSI_APP_SECRET: str | None = None
-    JITSI_ISSUER: str | None = None
-    JITSI_ALGORITHM: str = "HS256"
-    JITSI_TOKEN_TTL_SEC: int = 600
     MEETING_INVITE_TTL_SEC: int = 86400
     FRONTEND_APP_URL: str | None = None
 

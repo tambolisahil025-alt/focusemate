@@ -1,5 +1,5 @@
 """
-AI Assistant API Routes for FocuseMate
+AI Assistant API Routes for StudySpace
 Provides AI chat, suggestions, and context-aware help
 """
 
@@ -74,7 +74,7 @@ async def ai_chat(
             else "User: Guest"
         )
 
-        system_prompt = f"""You are FocuseMate AI Assistant, a helpful guide for a collaborative study platform.
+        system_prompt = f"""You are StudySpace AI Assistant, a helpful guide for a collaborative study platform.
 You help users:
 - Navigate the app
 - Understand features

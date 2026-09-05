@@ -1,1 +1,1 @@
-"""Services package for FocuseMate backend"""
+"""Services package for StudySpace backend"""

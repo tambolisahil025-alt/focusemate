@@ -46,7 +46,6 @@ class RoomResponse(RoomBase):
     id: int
     owner_id: int
     is_live: bool
-    meeting_link: Optional[str] = None
     member_count: int
     created_at: datetime
     model_config = ConfigDict(from_attributes=True)

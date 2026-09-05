@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 # 1. ADD 'features' TO THIS IMPORT
-from app.api.routers import auth, rooms, ws, users, features, messages, ai_router, meetings
+from app.api.routers import auth, rooms, ws, users, features, messages, ai_router, meetings, courses
 
 from app.core.config import settings
 from app.db.database import engine
@@ -39,10 +39,11 @@ app.include_router(ai_router.router)
 
 # meetings router
 app.include_router(meetings.router)
+app.include_router(courses.router)
 
 # 2. ADD THIS LINE
 app.include_router(features.router) 
 
 @app.get("/")
 def root():
-    return {"message": "Welcome to FocuseMate API"}
+    return {"message": "Welcome to StudySpace API"}

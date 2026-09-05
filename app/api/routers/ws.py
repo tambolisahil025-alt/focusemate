@@ -222,38 +222,48 @@ async def websocket_meeting(websocket: WebSocket, meeting_id: int, token: str):
         models.MeetingParticipant.meeting_id == meeting_id,
         models.MeetingParticipant.user_id == user.id
     ).first()
+    meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
     db.close()
 
     # Only approved participants or host can join meeting WS; pending users are not allowed here
-    if not participant or participant.status != "approved" or participant.banned:
+    if not meeting or meeting.status == "ended" or not participant or participant.status != "approved" or participant.banned:
         await websocket.close(code=1008)
         return
 
     await manager.connect_meeting(websocket, meeting_id)
 
     await manager.broadcast_to_meeting(meeting_id, {
-        "type": "meeting_user_joined",
+        "type": "participant-joined",
         "user_id": user.id,
-        "user_name": user.name
+        "name": user.name,
+        "avatar": user.avatar,
     })
 
     try:
         while True:
             raw = await websocket.receive_text()
             data = json.loads(raw)
-            # Simple pass-through events for approved participants
-            if data.get("type") == "meeting_chat":
+            event_type = data.get("type")
+            if event_type in {"offer", "answer", "ice-candidate", "participant-updated"}:
+                target = data.get("to")
+                message = {**data, "from": user.id}
+                if target:
+                    for connection in list(manager.meeting_connections.get(meeting_id, [])):
+                        await connection.send_json(message)
+                else:
+                    await manager.broadcast_to_meeting(meeting_id, message)
+            elif event_type == "meeting-chat":
                 await manager.broadcast_to_meeting(meeting_id, {
-                    "type": "meeting_chat",
+                    "type": "meeting-chat",
                     "user_id": user.id,
-                    "user_name": user.name,
+                    "name": user.name,
                     "content": data.get("content")
                 })
 
     except WebSocketDisconnect:
         manager.disconnect_meeting(websocket, meeting_id)
         await manager.broadcast_to_meeting(meeting_id, {
-            "type": "meeting_user_left",
+            "type": "participant-left",
             "user_id": user.id,
             "user_name": user.name
         })

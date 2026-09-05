@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text, ARRAY
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text, ARRAY, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.db.database import Base
@@ -32,7 +32,6 @@ class Room(Base):
     max_members = Column(Integer, default=50)
     owner_id = Column(Integer, ForeignKey("users.id"))
     is_live = Column(Boolean, default=False)
-    meeting_link = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     owner = relationship("User", back_populates="rooms_owned")
@@ -51,6 +50,31 @@ class RoomMember(Base):
 
     room = relationship("Room", back_populates="members")
     user = relationship("User", back_populates="memberships")
+
+class Course(Base):
+    __tablename__ = "courses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    code = Column(String, nullable=False, index=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    members = relationship("CourseMember", back_populates="course", cascade="all, delete-orphan")
+
+class CourseMember(Base):
+    __tablename__ = "course_members"
+    __table_args__ = (UniqueConstraint("course_id", "user_id", name="uq_course_member"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    role = Column(String, default="student", nullable=False)
+    joined_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    course = relationship("Course", back_populates="members")
+    user = relationship("User")
 
 class Message(Base):
     __tablename__ = "messages"
@@ -150,7 +174,7 @@ class Meeting(Base):
     id = Column(Integer, primary_key=True, index=True)
     room_id = Column(Integer, ForeignKey("rooms.id"), nullable=False)
     host_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    jitsi_room = Column(String, nullable=False)
+    meeting_code = Column(String, nullable=True, unique=True, index=True)
     status = Column(String, default="lobby") # lobby, live, ended
     auto_accept = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

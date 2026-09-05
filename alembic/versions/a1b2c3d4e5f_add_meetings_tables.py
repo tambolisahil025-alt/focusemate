@@ -22,7 +22,7 @@ def upgrade() -> None:
         sa.Column('id', sa.Integer(), nullable=False),
         sa.Column('room_id', sa.Integer(), nullable=False),
         sa.Column('host_id', sa.Integer(), nullable=False),
-        sa.Column('jitsi_room', sa.String(), nullable=False),
+        sa.Column('meeting_code', sa.String(), nullable=True),
         sa.Column('status', sa.String(), nullable=True),
         sa.Column('auto_accept', sa.Boolean(), nullable=True),
         sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
