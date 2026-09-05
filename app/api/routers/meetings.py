@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from app.api.deps import get_db, get_current_user
 from app.db import models
+from app.core.config import settings
 
 router = APIRouter(prefix="/meetings", tags=["meetings"])
 
