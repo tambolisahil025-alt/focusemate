@@ -117,3 +117,52 @@ class AIContextRequest(BaseModel):
     action: Optional[str] = None
     data: Optional[Dict[str, Any]] = None
     timestamp: Optional[str] = None
+
+class QuizGenerateRequest(BaseModel):
+    topic: str
+    subject: Optional[str] = None
+    difficulty: str = "medium"
+    question_count: int = 10
+
+class QuizQuestion(BaseModel):
+    question: str
+    options: List[str]
+    correct_answer: str
+    explanation: str
+    difficulty: str
+    topic: str
+
+class QuizGenerateResponse(BaseModel):
+    topic: str
+    subject: Optional[str] = None
+    difficulty: str
+    questions: List[QuizQuestion]
+
+class QuizCompleteRequest(BaseModel):
+    topic: str
+    subject: Optional[str] = None
+    difficulty: str
+    question_count: int
+    correct_answers: int
+
+class QuizAttemptResponse(BaseModel):
+    id: int
+    topic: str
+    subject: Optional[str] = None
+    difficulty: str
+    question_count: int
+    correct_answers: int
+    score: int
+    percentage: int
+    xp_earned: int
+    created_at: datetime
+    user_xp: Optional[int] = None
+    user_level: Optional[int] = None
+    model_config = ConfigDict(from_attributes=True)
+
+class GamificationResponse(BaseModel):
+    xp: int
+    level: int
+    current_level_xp: int
+    xp_to_next_level: int
+    badges: List[Dict[str, str]]

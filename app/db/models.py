@@ -155,6 +155,21 @@ class Ticket(Base):
     status = Column(String, default="open")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+class QuizAttempt(Base):
+    __tablename__ = "quiz_attempts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    subject = Column(String, nullable=True)
+    topic = Column(String, nullable=False)
+    difficulty = Column(String, nullable=False)
+    question_count = Column(Integer, nullable=False)
+    correct_answers = Column(Integer, nullable=False)
+    score = Column(Integer, nullable=False)
+    percentage = Column(Integer, nullable=False)
+    xp_earned = Column(Integer, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
 # --- NEW: DIRECT MESSAGES MODEL ---
 class DirectMessage(Base):
     __tablename__ = "direct_messages"
