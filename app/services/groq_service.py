@@ -1,10 +1,10 @@
 """
-GROQ AI Service for FocuseMate
+GROQ AI Service for StudySpace
 Provides secure AI chat integration using GROQ API
 """
-
 import asyncio
 import json
+import re
 from typing import Optional, Dict, Any, List
 import httpx
 from app.core.config import settings
@@ -17,16 +17,16 @@ class GroqService:
     """Service for interacting with GROQ AI API"""
     
     BASE_URL = "https://api.groq.com/openai/v1"
-    DEFAULT_MODEL = "openai/gpt-oss-120b"
+    MODEL = "llama-3.3-70b-versatile"
     DEFAULT_TIMEOUT = 30.0
     MAX_RETRIES = 3
     
     def __init__(self, api_key: Optional[str] = None):
         """Initialize GROQ service with API key"""
         self.api_key = api_key or settings.GROQ_API_KEY
+        self.model = settings.GROQ_MODEL or self.MODEL
         if not self.api_key:
             raise ValueError("GROQ_API_KEY environment variable not set")
-        self.model = settings.GROQ_MODEL or self.DEFAULT_MODEL
         
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -64,6 +64,7 @@ class GroqService:
             raise Exception(f"GROQ API timeout after {self.MAX_RETRIES} retries")
         
         except httpx.HTTPStatusError as e:
+
             status_code = e.response.status_code
             response_text = e.response.text or ""
             logger.error(f"GROQ API error: {status_code} - {response_text}")
@@ -155,7 +156,7 @@ class GroqService:
         if app_context:
             context_str += f", Context: {json.dumps(app_context, default=str)}"
         
-        system_prompt = """You are a helpful in-app assistant for FocuseMate, a collaborative study platform. 
+        system_prompt = """You are a helpful in-app assistant for StudySpace, a collaborative study platform. 
         Provide 2-3 brief, actionable suggestions for the user based on the current screen and action.
         Format as a JSON array of strings. Keep suggestions short (max 60 chars each)."""
         
@@ -194,7 +195,7 @@ class GroqService:
         Returns:
             Help text
         """
-        system_prompt = """You are a helpful guide for FocuseMate. Provide brief, friendly help text 
+        system_prompt = """You are a helpful guide for StudySpace. Provide brief, friendly help text 
         for the given screen. Keep response under 200 chars."""
         
         content = f"Help for screen: {screen_name}"
@@ -213,6 +214,41 @@ class GroqService:
             temperature=0.5
         )
 
+    async def generate_quiz(self, topic: str, subject: Optional[str], difficulty: str, question_count: int) -> List[Dict[str, Any]]:
+        """Generate structured quiz JSON through the existing AI integration."""
+        label = f"{subject} - {topic}" if subject else topic
+        system_prompt = f"""You generate educational multiple-choice quizzes. Return ONLY a JSON array with exactly {question_count} objects.
+Each object must contain: question (string), options (array of exactly 4 strings), correct_answer (one option string copied exactly from options), explanation (string), difficulty (exactly {difficulty}), and topic (exactly {topic}).
+"""
+        response = await self.chat(
+            messages=[{"role": "user", "content": f"Create a {difficulty} quiz about {label}. Avoid duplicate questions and keep every question relevant."}],
+            system_prompt=system_prompt,
+            max_tokens=min(7000, max(1200, question_count * 500)),
+            temperature=0.4,
+        )
+        candidate = response.strip()
+        if candidate.startswith("```"):
+            candidate = re.sub(r"^```(?:json)?\s*|\s*```$", "", candidate, flags=re.IGNORECASE | re.DOTALL).strip()
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            decoder = json.JSONDecoder()
+            parsed = None
+            for start, character in enumerate(candidate):
+                if character not in "[{":
+                    continue
+                try:
+                    parsed, _ = decoder.raw_decode(candidate[start:])
+                    break
+                except json.JSONDecodeError:
+                    continue
+            if parsed is None:
+                raise ValueError("AI returned invalid quiz JSON")
+        if isinstance(parsed, dict):
+            parsed = parsed.get("questions")
+        if not isinstance(parsed, list):
+            raise ValueError("AI returned an invalid quiz format")
+        return parsed
 
 # Global GROQ service instance
 _groq_service: Optional[GroqService] = None

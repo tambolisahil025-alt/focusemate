@@ -20,7 +20,7 @@ def _validate_questions(items: list, topic: str, difficulty: str) -> List[schema
             continue
         question = str(item.get("question", "")).strip()
         options = item.get("options")
-        answer = str(item.get("correct_answer", "")).strip()
+        answer = str(item.get("correct_answer", item.get("correctAnswer", ""))).strip()
         explanation = str(item.get("explanation", "")).strip()
         if not question or question.lower() in seen or not isinstance(options, list) or len(options) != 4:
             continue
