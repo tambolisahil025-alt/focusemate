@@ -397,15 +397,18 @@ def create_room_meeting(room_id: int, db: Session = Depends(get_db), current_use
 
         agora_token = None
         if settings.AGORA_APP_ID and settings.AGORA_APP_CERTIFICATE:
-            from agora_token_builder import RtcTokenBuilder, Role_Publisher
-            agora_token = RtcTokenBuilder.buildTokenWithUid(
-                settings.AGORA_APP_ID,
-                settings.AGORA_APP_CERTIFICATE,
-                meeting_code,
-                current_user.id,
-                Role_Publisher,
-                settings.AGORA_TOKEN_TTL_SEC,
-            )
+            try:
+                from agora_token_builder import RtcTokenBuilder, Role_Publisher
+                agora_token = RtcTokenBuilder.buildTokenWithUid(
+                    settings.AGORA_APP_ID,
+                    settings.AGORA_APP_CERTIFICATE,
+                    meeting_code,
+                    current_user.id,
+                    Role_Publisher,
+                    settings.AGORA_TOKEN_TTL_SEC,
+                )
+            except Exception:
+                logger.error("Agora token generation failed for meeting %s", meeting_code, exc_info=True)
 
         room.is_live = True
         db.commit()

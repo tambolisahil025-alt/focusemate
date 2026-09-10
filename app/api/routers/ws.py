@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import shutil
 import uuid
@@ -15,6 +16,7 @@ from app.db import models
 from app.api.deps import get_db, get_current_user
 
 router = APIRouter(tags=["websockets"])
+logger = logging.getLogger(__name__)
 
 UPLOAD_DIR = "uploads/messages"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -208,6 +210,13 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
             "user_id": user.id,
             "user_name": user.name
         })
+    except Exception:
+        logger.exception("Room chat WebSocket failed for room %s and user %s", room_id, user.id)
+        manager.disconnect(websocket, room_id)
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass
 
 
 @router.websocket("/ws/meetings/{meeting_id}")
