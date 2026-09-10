@@ -84,6 +84,7 @@ class Message(Base):
     sender_id = Column(Integer, ForeignKey("users.id"), nullable=True) # Nullable for system messages
     content = Column(Text, nullable=False)
     message_type = Column(String, default="text") # text, system
+    is_edited = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     room = relationship("Room", back_populates="messages")

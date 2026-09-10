@@ -58,9 +58,13 @@ class MessageResponse(BaseModel):
     sender_avatar: Optional[str]
     content: str
     message_type: str
+    is_edited: bool = False
     reply_to: Optional[int] = None
     created_at: datetime
     model_config = ConfigDict(from_attributes=True)
+
+class MessageUpdate(BaseModel):
+    content: str
 
 # --- NEW: DIRECT MESSAGES SCHEMAS ---
 class DirectMessageCreate(BaseModel):

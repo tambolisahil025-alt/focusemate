@@ -189,6 +189,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
                         "sender_avatar": user.avatar,
                         "content": message_data.get("content"),
                         "message_type": message_type,
+                        "is_edited": new_msg.is_edited,
                         "reply_to": reply_to,
                         "created_at": new_msg.created_at.isoformat() if new_msg.created_at else None
                     }

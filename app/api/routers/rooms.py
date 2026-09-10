@@ -1,4 +1,5 @@
 import os
+import json
 import shutil
 import logging
 from datetime import datetime
@@ -300,6 +301,46 @@ def get_room(room_id: int, db: Session = Depends(get_db), current_user: models.U
     setattr(room, 'member_count', member_count)
     return room
 
+@router.get("/{room_id}/messages")
+def get_room_messages(
+    room_id: int,
+    limit: int = 100,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    require_room_member(db, room_id, current_user.id)
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
+    messages = db.query(models.Message).filter(
+        models.Message.room_id == room_id
+    ).order_by(models.Message.created_at.asc()).offset(offset).limit(limit).all()
+    result = []
+    for message in messages:
+        sender = db.query(models.User).filter(models.User.id == message.sender_id).first() if message.sender_id else None
+        content = message.content
+        reply_to = None
+        if message.message_type == "reply":
+            try:
+                parsed = json.loads(message.content)
+                reply_to = parsed.get("reply_to")
+                content = parsed.get("text", message.content)
+            except (TypeError, ValueError):
+                pass
+        result.append({
+            "id": message.id,
+            "room_id": message.room_id,
+            "sender_id": message.sender_id,
+            "sender_name": sender.name if sender else "System",
+            "sender_avatar": sender.avatar if sender else None,
+            "content": content,
+            "message_type": message.message_type,
+            "is_edited": message.is_edited,
+            "reply_to": reply_to,
+            "created_at": message.created_at,
+        })
+    return {"messages": result, "limit": limit, "offset": offset}
+
 @router.get("/{room_id}/members/")
 def get_room_members(room_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # Only room members or owner can list members
@@ -387,28 +428,30 @@ def create_room_meeting(room_id: int, db: Session = Depends(get_db), current_use
         raise HTTPException(status_code=403, detail="Join the room before creating a meeting")
     if membership.role not in {"owner", "admin"}:
         raise HTTPException(status_code=403, detail="Only a room owner or admin can create meetings")
-        
+
     try:
+        missing_keys = [key for key, value in {
+            "AGORA_APP_ID": settings.AGORA_APP_ID,
+            "AGORA_APP_CERTIFICATE": settings.AGORA_APP_CERTIFICATE,
+        }.items() if not value]
+        if missing_keys:
+            raise HTTPException(status_code=500, detail=f"Missing Agora configuration: {', '.join(missing_keys)}")
+
         meeting_code = f"{uuid.uuid4().hex[:8].upper()}-{uuid.uuid4().hex[:3].upper()}"
         meeting = models.Meeting(room_id=room_id, host_id=current_user.id, meeting_code=meeting_code, status="live", auto_accept=True)
         db.add(meeting)
         db.flush()
         db.add(models.MeetingParticipant(meeting_id=meeting.id, user_id=current_user.id, role="host", status="approved", joined_at=datetime.utcnow()))
 
-        agora_token = None
-        if settings.AGORA_APP_ID and settings.AGORA_APP_CERTIFICATE:
-            try:
-                from agora_token_builder import RtcTokenBuilder, Role_Publisher
-                agora_token = RtcTokenBuilder.buildTokenWithUid(
-                    settings.AGORA_APP_ID,
-                    settings.AGORA_APP_CERTIFICATE,
-                    meeting_code,
-                    current_user.id,
-                    Role_Publisher,
-                    settings.AGORA_TOKEN_TTL_SEC,
-                )
-            except Exception:
-                logger.error("Agora token generation failed for meeting %s", meeting_code, exc_info=True)
+        from agora_token_builder import RtcTokenBuilder, Role_Publisher
+        agora_token = RtcTokenBuilder.buildTokenWithUid(
+            settings.AGORA_APP_ID,
+            settings.AGORA_APP_CERTIFICATE,
+            meeting_code,
+            current_user.id,
+            Role_Publisher,
+            settings.AGORA_TOKEN_TTL_SEC,
+        )
 
         room.is_live = True
         db.commit()
@@ -421,9 +464,12 @@ def create_room_meeting(room_id: int, db: Session = Depends(get_db), current_use
             "agora_app_id": settings.AGORA_APP_ID,
             "agora_token": agora_token,
         }
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as exc:
         db.rollback()
-        logger.error("Meeting creation failed for room %s and user %s: %s", room_id, current_user.id, exc, exc_info=True)
+        logger.exception("Meeting creation failed for room %s and user %s", room_id, current_user.id)
         raise HTTPException(status_code=500, detail="Unable to create the meeting right now") from exc
 # --- ADD THESE TO THE BOTTOM OF rooms.py ---
 
