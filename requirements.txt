@@ -11,3 +11,4 @@ passlib[bcrypt]==1.7.4
 python-multipart==0.0.9
 websockets==12.0
 httpx==0.24.1
+agora-token-builder==1.0.0

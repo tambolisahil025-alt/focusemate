@@ -32,6 +32,9 @@ class Settings(BaseSettings):
 
     MEETING_INVITE_TTL_SEC: int = 86400
     FRONTEND_APP_URL: str | None = None
+    AGORA_APP_ID: str | None = None
+    AGORA_APP_CERTIFICATE: str | None = None
+    AGORA_TOKEN_TTL_SEC: int = 3600
 
     class Config:
         env_file = ".env"

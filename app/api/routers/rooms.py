@@ -1,5 +1,6 @@
 import os
 import shutil
+import logging
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
 from sqlalchemy.orm import Session
@@ -10,6 +11,9 @@ from app.schemas import schemas
 from app.api.deps import get_db, get_current_user
 import uuid
 from pydantic import BaseModel
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/rooms", tags=["rooms"])
 
@@ -384,16 +388,40 @@ def create_room_meeting(room_id: int, db: Session = Depends(get_db), current_use
     if membership.role not in {"owner", "admin"}:
         raise HTTPException(status_code=403, detail="Only a room owner or admin can create meetings")
         
-    meeting_code = f"{uuid.uuid4().hex[:8].upper()}-{uuid.uuid4().hex[:3].upper()}"
-    meeting = models.Meeting(room_id=room_id, host_id=current_user.id, meeting_code=meeting_code, status="live", auto_accept=True)
-    db.add(meeting)
-    db.flush()
-    db.add(models.MeetingParticipant(meeting_id=meeting.id, user_id=current_user.id, role="host", status="approved", joined_at=datetime.utcnow()))
-    db.commit()
-    db.refresh(meeting)
-    room.is_live = True
-    db.commit()
-    return {"meeting_id": meeting.id, "meeting_code": meeting.meeting_code, "status": meeting.status, "host_id": meeting.host_id}
+    try:
+        meeting_code = f"{uuid.uuid4().hex[:8].upper()}-{uuid.uuid4().hex[:3].upper()}"
+        meeting = models.Meeting(room_id=room_id, host_id=current_user.id, meeting_code=meeting_code, status="live", auto_accept=True)
+        db.add(meeting)
+        db.flush()
+        db.add(models.MeetingParticipant(meeting_id=meeting.id, user_id=current_user.id, role="host", status="approved", joined_at=datetime.utcnow()))
+
+        agora_token = None
+        if settings.AGORA_APP_ID and settings.AGORA_APP_CERTIFICATE:
+            from agora_token_builder import RtcTokenBuilder, Role_Publisher
+            agora_token = RtcTokenBuilder.buildTokenWithUid(
+                settings.AGORA_APP_ID,
+                settings.AGORA_APP_CERTIFICATE,
+                meeting_code,
+                current_user.id,
+                Role_Publisher,
+                settings.AGORA_TOKEN_TTL_SEC,
+            )
+
+        room.is_live = True
+        db.commit()
+        db.refresh(meeting)
+        return {
+            "meeting_id": meeting.id,
+            "meeting_code": meeting.meeting_code,
+            "status": meeting.status,
+            "host_id": meeting.host_id,
+            "agora_app_id": settings.AGORA_APP_ID,
+            "agora_token": agora_token,
+        }
+    except Exception as exc:
+        db.rollback()
+        logger.error("Meeting creation failed for room %s and user %s: %s", room_id, current_user.id, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="Unable to create the meeting right now") from exc
 # --- ADD THESE TO THE BOTTOM OF rooms.py ---
 
 # 1. Define what the incoming resource data looks like
