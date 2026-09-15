@@ -8,7 +8,6 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, UploadFile, File, Form, Request
 from jose import jwt, JWTError
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
 
 from app.db.database import SessionLocal
 from app.core.config import settings
@@ -353,72 +352,6 @@ async def direct_message_websocket(websocket: WebSocket, token: str):
             "user_id": user.id,
             "status": "offline"
         })
-
-# ---------------------------------------------------------
-# REST API Routes
-# ---------------------------------------------------------
-class MessageCreate(BaseModel):
-    room_id: int
-    content: str
-    message_type: str = "text"
-
-# NOTE: operation_id added here to fix Uvicorn duplicate warnings
-@router.get("/messages/room/{room_id}", operation_id="fetch_room_messages")
-def get_room_messages(
-    room_id: int, 
-    limit: int = 100, 
-    offset: int = 0, 
-    db: Session = Depends(get_db), 
-    current_user: models.User = Depends(get_current_user)
-):
-    messages = db.query(models.Message).filter(
-        models.Message.room_id == room_id
-    ).order_by(models.Message.created_at.desc()).offset(offset).limit(limit).all()
-    
-    result = []
-    for msg in messages:
-        sender = db.query(models.User).filter(models.User.id == msg.sender_id).first() if msg.sender_id else None
-        result.append({
-            "id": msg.id,
-            "room_id": msg.room_id,
-            "sender_id": msg.sender_id,
-            "sender_name": sender.name if sender else "System",
-            "sender_avatar": sender.avatar if sender else None,
-            "sender_level": sender.level if sender else None,
-            "sender_xp": sender.xp if sender else None,
-            "content": msg.content,
-            "message_type": msg.message_type,
-            "created_at": msg.created_at.isoformat() if msg.created_at else None
-        })
-    return {"messages": result}
-
-# NOTE: operation_id added here to fix Uvicorn duplicate warnings
-@router.post("/messages/", operation_id="post_new_message")
-def create_message(
-    payload: MessageCreate, 
-    db: Session = Depends(get_db), 
-    current_user: models.User = Depends(get_current_user)
-):
-    new_msg = models.Message(
-        room_id=payload.room_id,
-        sender_id=current_user.id,
-        content=payload.content,
-        message_type=payload.message_type
-    )
-    db.add(new_msg)
-    db.commit()
-    db.refresh(new_msg)
-    
-    return {
-        "id": new_msg.id,
-        "room_id": new_msg.room_id,
-        "sender_id": current_user.id,
-        "sender_name": current_user.name,
-        "sender_avatar": current_user.avatar,
-        "content": new_msg.content,
-        "message_type": new_msg.message_type,
-        "created_at": new_msg.created_at.isoformat() if new_msg.created_at else None
-    }
 
 @router.post("/messages/attachments/")
 async def upload_message_attachment(
