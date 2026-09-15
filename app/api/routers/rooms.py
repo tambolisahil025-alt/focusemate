@@ -431,28 +431,11 @@ def create_room_meeting(room_id: int, db: Session = Depends(get_db), current_use
         raise HTTPException(status_code=403, detail="Only a room owner or admin can create meetings")
 
     try:
-        missing_keys = [key for key, value in {
-            "AGORA_APP_ID": settings.AGORA_APP_ID,
-            "AGORA_APP_CERTIFICATE": settings.AGORA_APP_CERTIFICATE,
-        }.items() if not value]
-        if missing_keys:
-            raise HTTPException(status_code=500, detail=f"Missing Agora configuration: {', '.join(missing_keys)}")
-
         meeting_code = f"{uuid.uuid4().hex[:8].upper()}-{uuid.uuid4().hex[:3].upper()}"
         meeting = models.Meeting(room_id=room_id, host_id=current_user.id, meeting_code=meeting_code, status="live", auto_accept=True)
         db.add(meeting)
         db.flush()
         db.add(models.MeetingParticipant(meeting_id=meeting.id, user_id=current_user.id, role="host", status="approved", joined_at=datetime.utcnow()))
-
-        from agora_token_builder import RtcTokenBuilder, Role_Publisher
-        agora_token = RtcTokenBuilder.buildTokenWithUid(
-            settings.AGORA_APP_ID,
-            settings.AGORA_APP_CERTIFICATE,
-            meeting_code,
-            current_user.id,
-            Role_Publisher,
-            settings.AGORA_TOKEN_TTL_SEC,
-        )
 
         room.is_live = True
         db.commit()
@@ -462,8 +445,6 @@ def create_room_meeting(room_id: int, db: Session = Depends(get_db), current_use
             "meeting_code": meeting.meeting_code,
             "status": meeting.status,
             "host_id": meeting.host_id,
-            "agora_app_id": settings.AGORA_APP_ID,
-            "agora_token": agora_token,
         }
     except HTTPException:
         db.rollback()
