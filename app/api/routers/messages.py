@@ -40,7 +40,7 @@ def message_payload(message: models.Message, sender: Optional[models.User] = Non
     }
 
 @router.post("/", response_model=schemas.MessageResponse)
-def create_message(
+async def create_message(
     payload: MessageCreate,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
@@ -78,7 +78,7 @@ def create_message(
     db.commit()
     db.refresh(new_message)
     
-    return {
+    response = {
         "id": new_message.id,
         "room_id": new_message.room_id,
         "sender_id": new_message.sender_id,
@@ -90,6 +90,8 @@ def create_message(
         "reply_to": payload.reply_to,
         "created_at": new_message.created_at
     }
+    await manager.broadcast_to_room(payload.room_id, {"type": "chat_message", "data": response})
+    return response
 
 @router.put("/{message_id}", response_model=schemas.MessageResponse)
 async def update_message(message_id: int, payload: schemas.MessageUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):

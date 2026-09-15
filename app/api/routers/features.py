@@ -5,6 +5,7 @@ from typing import Dict, Any
 from app.db import models
 from app.schemas import schemas  # <-- ADDED THIS IMPORT
 from app.api.deps import get_db, get_current_user
+from app.api.routers.ws import manager
 from pydantic import BaseModel
 
 router = APIRouter(tags=["features"])
@@ -354,7 +355,7 @@ def mark_notifications_as_read(
 # --- NEW: DIRECT MESSAGES ---
 
 @router.post("/messages/direct", response_model=schemas.DirectMessageResponse)
-def send_direct_message(
+async def send_direct_message(
     message: schemas.DirectMessageCreate,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
@@ -391,12 +392,14 @@ def send_direct_message(
     db.add(notif)
     db.commit()
 
-    return {
+    response = {
         **new_msg.__dict__,
         "sender_name": current_user.name,
         "sender_avatar": current_user.avatar,
         "reply_to": message.reply_to
     }
+    await manager.broadcast_direct([current_user.id, receiver.id], {"type": "direct_message", "data": response})
+    return response
 
 @router.get("/messages/direct/{recipient_id}")
 def get_direct_messages(
