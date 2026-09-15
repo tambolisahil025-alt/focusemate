@@ -6,6 +6,9 @@ from app.db import models
 from app.schemas import schemas
 from app.api.deps import get_db, get_current_user
 from app.api.routers.ws import manager
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 
@@ -90,7 +93,11 @@ async def create_message(
         "reply_to": payload.reply_to,
         "created_at": new_message.created_at
     }
-    await manager.broadcast_to_room(payload.room_id, {"type": "chat_message", "data": response})
+    broadcast_response = {**response, "created_at": response["created_at"].isoformat() if response["created_at"] else None}
+    try:
+        await manager.broadcast_to_room(payload.room_id, {"type": "chat_message", "data": broadcast_response})
+    except Exception:
+        logger.exception("Unable to broadcast room message %s", new_message.id)
     return response
 
 @router.put("/{message_id}", response_model=schemas.MessageResponse)

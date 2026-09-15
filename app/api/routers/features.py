@@ -6,9 +6,11 @@ from app.db import models
 from app.schemas import schemas  # <-- ADDED THIS IMPORT
 from app.api.deps import get_db, get_current_user
 from app.api.routers.ws import manager
+import logging
 from pydantic import BaseModel
 
 router = APIRouter(tags=["features"])
+logger = logging.getLogger(__name__)
 
 # --- ANALYTICS ---
 @router.get("/analytics/me")
@@ -398,7 +400,14 @@ async def send_direct_message(
         "sender_avatar": current_user.avatar,
         "reply_to": message.reply_to
     }
-    await manager.broadcast_direct([current_user.id, receiver.id], {"type": "direct_message", "data": response})
+    broadcast_response = {
+        **response,
+        "created_at": response["created_at"].isoformat() if response.get("created_at") else None,
+    }
+    try:
+        await manager.broadcast_direct([current_user.id, receiver.id], {"type": "direct_message", "data": broadcast_response})
+    except Exception:
+        logger.exception("Unable to broadcast direct message %s", new_msg.id)
     return response
 
 @router.get("/messages/direct/{recipient_id}")
