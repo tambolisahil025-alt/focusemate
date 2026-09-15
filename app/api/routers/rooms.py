@@ -310,14 +310,15 @@ def get_room_messages(
     current_user: models.User = Depends(get_current_user),
 ):
     require_room_member(db, room_id, current_user.id)
-    limit = max(1, min(limit, 100))
+    limit = max(1, min(limit, 50))
     offset = max(0, offset)
-    messages = db.query(models.Message).filter(
+    messages = db.query(models.Message, models.User).outerjoin(
+        models.User, models.Message.sender_id == models.User.id
+    ).filter(
         models.Message.room_id == room_id
     ).order_by(models.Message.created_at.asc()).offset(offset).limit(limit).all()
     result = []
-    for message in messages:
-        sender = db.query(models.User).filter(models.User.id == message.sender_id).first() if message.sender_id else None
+    for message, sender in messages:
         content = message.content
         reply_to = None
         if message.message_type == "reply":
