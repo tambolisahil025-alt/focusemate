@@ -1,11 +1,9 @@
-import os
 import json
-import shutil
 import logging
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
 from sqlalchemy.orm import Session
-from sqlalchemy import func, inspect, text as sa_text
+from sqlalchemy import func
 from typing import List, Optional
 from app.db import models
 from app.schemas import schemas
@@ -13,44 +11,15 @@ from app.api.deps import get_db, get_current_user
 import uuid
 from pydantic import BaseModel
 from app.core.config import settings
-from app.api.routers.messages import active_media_filter
+from app.services.storage_service import upload_upload_file, delete_storage_url
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/rooms", tags=["rooms"])
 
-UPLOAD_DIR = "uploads/resources"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 class JoinRequestAction(BaseModel):
     action: str
-
-
-def ensure_meeting_schema(db: Session):
-    """Ensure meeting tables/columns exist before any rooms endpoint queries them.
-
-    This protects older Render databases where the Alembic meeting migration was
-    stamped/applied incompletely. It is idempotent and does not replace data.
-    """
-    bind = db.get_bind()
-    for table in (
-        models.Meeting.__table__,
-        models.MeetingParticipant.__table__,
-        models.MeetingInvitation.__table__,
-    ):
-        table.create(bind=bind, checkfirst=True)
-    inspector = inspect(bind)
-    columns = {c["name"] for c in inspector.get_columns("meetings")}
-    if "meeting_code" not in columns:
-        with bind.begin() as conn:
-            conn.execute(sa_text("ALTER TABLE meetings ADD COLUMN IF NOT EXISTS meeting_code VARCHAR"))
-    if "topic" not in columns:
-        with bind.begin() as conn:
-            conn.execute(sa_text("ALTER TABLE meetings ADD COLUMN IF NOT EXISTS topic VARCHAR(120)"))
-    if "password_hash" not in columns:
-        with bind.begin() as conn:
-            conn.execute(sa_text("ALTER TABLE meetings ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255)"))
-
 
 def get_room_member(db: Session, room_id: int, user_id: int):
     return db.query(models.RoomMember).filter(
@@ -265,7 +234,6 @@ def update_room(room_id: int, payload: schemas.RoomUpdate, db: Session = Depends
 
 @router.delete("/{room_id}")
 def delete_room(room_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    ensure_meeting_schema(db)
     room = db.query(models.Room).filter(models.Room.id == room_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
@@ -345,7 +313,6 @@ def get_room_messages(
         models.User, models.Message.sender_id == models.User.id
     ).filter(
         models.Message.room_id == room_id,
-        active_media_filter(models.Message),
     ).order_by(models.Message.created_at.desc()).offset(offset).limit(limit).all()
     messages = list(reversed(messages))
     result = []
@@ -367,7 +334,6 @@ def get_room_messages(
             "sender_avatar": sender.avatar if sender else None,
             "content": content,
             "message_type": message.message_type,
-            "media_expires_at": message.media_expires_at,
             "is_edited": message.is_edited,
             "reply_to": reply_to,
             "created_at": message.created_at,
@@ -423,14 +389,11 @@ async def upload_room_resource(
         raise HTTPException(status_code=404, detail="Room not found")
     require_room_member(db, room_id, current_user.id)
 
-    file_ext = file.filename.split('.')[-1] if file.filename else 'bin'
-    file_name = f"{uuid.uuid4()}.{file_ext}"
-    file_path = os.path.join(UPLOAD_DIR, file_name)
-    with open(file_path, 'wb') as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    base_url = str(request.base_url).rstrip('/') if request else ''
-    resource_url = f"{base_url}/static/resources/{file_name}"
+    try:
+        resource_url = await upload_upload_file(file, f"rooms/{room_id}/resources")
+    except Exception as exc:
+        logger.exception("Unable to upload room resource to Supabase Storage")
+        raise HTTPException(status_code=502, detail="Unable to store resource in cloud storage") from exc
 
     new_resource = models.Resource(
         room_id=room_id,
@@ -446,9 +409,41 @@ async def upload_room_resource(
 
     return new_resource
 
+@router.delete("/{room_id}/resources/{resource_id}")
+async def delete_room_resource(
+    room_id: int,
+    resource_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    room = db.query(models.Room).filter(models.Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    membership = get_room_member(db, room_id, current_user.id)
+    if room.owner_id != current_user.id and not membership:
+        raise HTTPException(status_code=403, detail="You are not a member of this room")
+
+    resource = db.query(models.Resource).filter(
+        models.Resource.id == resource_id,
+        models.Resource.room_id == room_id,
+    ).first()
+    if not resource:
+        raise HTTPException(status_code=404, detail="Resource not found")
+
+    try:
+        await delete_storage_url(resource.link)
+    except Exception as exc:
+        logger.exception("Unable to delete resource file from Supabase Storage")
+        raise HTTPException(status_code=502, detail="Unable to delete resource file from cloud storage") from exc
+
+    db.delete(resource)
+    db.commit()
+    return {"detail": "Resource deleted"}
+
+
 @router.post("/{room_id}/meeting")
 def create_room_meeting(room_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    ensure_meeting_schema(db)
     room = db.query(models.Room).filter(models.Room.id == room_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")

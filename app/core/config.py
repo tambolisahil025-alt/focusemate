@@ -35,9 +35,10 @@ class Settings(BaseSettings):
     AGORA_APP_ID: str | None = None
     AGORA_APP_CERTIFICATE: str | None = None
     AGORA_TOKEN_TTL_SEC: int = 3600
-    # Media messages expire server-side after this many seconds. Existing media
-    # rows with NULL media_expires_at remain available for backward compatibility.
-    MESSAGE_MEDIA_TTL_SEC: int = 86400
+    # Legacy field retained only for database compatibility. Media never expires automatically.
+    SUPABASE_URL: str | None = None
+    SUPABASE_SERVICE_ROLE_KEY: str | None = None
+    SUPABASE_STORAGE_BUCKET: str = "focusemate-media"
 
     class Config:
         env_file = ".env"

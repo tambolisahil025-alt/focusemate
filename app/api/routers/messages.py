@@ -2,30 +2,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
-from datetime import datetime, timedelta, timezone
 from sqlalchemy import or_
 from app.db import models
 from app.schemas import schemas
 from app.api.deps import get_db, get_current_user
 from app.api.routers.ws import manager
-from app.core.config import settings
+from app.services.storage_service import delete_storage_url
 import logging
 
 logger = logging.getLogger(__name__)
-
-MEDIA_MESSAGE_TYPES = {"image", "video", "file", "audio"}
-
-def media_expiration_for(message_type: str):
-    if message_type in MEDIA_MESSAGE_TYPES and settings.MESSAGE_MEDIA_TTL_SEC > 0:
-        return datetime.now(timezone.utc) + timedelta(seconds=settings.MESSAGE_MEDIA_TTL_SEC)
-    return None
-
-def active_media_filter(model):
-    return or_(
-        ~model.message_type.in_(MEDIA_MESSAGE_TYPES),
-        model.media_expires_at.is_(None),
-        model.media_expires_at > datetime.now(timezone.utc),
-    )
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 
@@ -54,7 +39,6 @@ def message_payload(message: models.Message, sender: Optional[models.User] = Non
         "sender_avatar": sender.avatar if sender else None,
         "content": content,
         "message_type": message.message_type,
-        "media_expires_at": message.media_expires_at,
         "is_edited": message.is_edited,
         "reply_to": reply_to,
         "created_at": message.created_at,
@@ -94,7 +78,6 @@ async def create_message(
         sender_id=current_user.id,
         content=content_to_store,
         message_type=payload.message_type,
-        media_expires_at=media_expiration_for(payload.message_type),
     )
     db.add(new_message)
     db.commit()
@@ -108,7 +91,6 @@ async def create_message(
         "sender_avatar": current_user.avatar,
         "content": payload.content,
         "message_type": new_message.message_type,
-        "media_expires_at": new_message.media_expires_at,
         "is_edited": new_message.is_edited,
         "reply_to": payload.reply_to,
         "created_at": new_message.created_at
@@ -148,6 +130,7 @@ async def delete_direct_message(message_id: int, db: Session = Depends(get_db), 
         raise HTTPException(status_code=403, detail="You can only delete your own messages")
     sender_id = msg.sender_id
     receiver_id = msg.receiver_id
+    await delete_storage_url(msg.content)
     db.delete(msg)
     db.commit()
     await manager.broadcast_direct([sender_id, receiver_id], {
@@ -164,6 +147,7 @@ async def delete_message(message_id: int, db: Session = Depends(get_db), current
     if msg.sender_id != current_user.id:
         raise HTTPException(status_code=403, detail="You can only delete your own messages")
     room_id = msg.room_id
+    await delete_storage_url(msg.content)
     db.delete(msg)
     db.commit()
     await manager.broadcast_to_room(room_id, {"type": "message_deleted", "action": "message_deleted", "message_id": message_id})
@@ -193,7 +177,6 @@ async def create_direct_message(
         receiver_id=payload.receiver_id,
         content=content_to_store,
         message_type=message_type,
-        media_expires_at=media_expiration_for(message_type),
     )
     db.add(new_message)
     db.commit()
@@ -205,7 +188,6 @@ async def create_direct_message(
         "receiver_id": new_message.receiver_id,
         "content": payload.content,
         "message_type": new_message.message_type,
-        "media_expires_at": new_message.media_expires_at,
         "created_at": new_message.created_at,
         "sender_name": current_user.name,
         "sender_avatar": current_user.avatar,
@@ -225,7 +207,7 @@ async def create_direct_message(
         {
             "type": "direct_message",
             "data": {**response, "created_at": response["created_at"].isoformat() if response["created_at"] else None,
-                      "media_expires_at": response["media_expires_at"].isoformat() if response["media_expires_at"] else None},
+                      },
         },
     )
     return response
@@ -250,7 +232,6 @@ def get_direct_messages(
             (models.DirectMessage.sender_id == current_user.id) & (models.DirectMessage.receiver_id == recipient_id),
             (models.DirectMessage.sender_id == recipient_id) & (models.DirectMessage.receiver_id == current_user.id),
         ),
-        active_media_filter(models.DirectMessage),
     ).order_by(models.DirectMessage.created_at.desc()).offset(offset).limit(limit).all()
 
     result = []
@@ -271,8 +252,7 @@ def get_direct_messages(
             "receiver_id": message.receiver_id,
             "content": content,
             "message_type": message.message_type,
-            "media_expires_at": message.media_expires_at,
-            "created_at": message.created_at,
+                "created_at": message.created_at,
             "sender_name": sender.name if sender else None,
             "sender_avatar": sender.avatar if sender else None,
             "reply_to": reply_to,
@@ -302,7 +282,6 @@ def get_room_messages(
     
     messages = db.query(models.Message).filter(
         models.Message.room_id == room_id,
-        active_media_filter(models.Message),
     ).order_by(models.Message.created_at.desc()).offset(offset).limit(limit).all()
     messages = list(reversed(messages))
     

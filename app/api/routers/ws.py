@@ -1,25 +1,20 @@
 import json
 import logging
-import os
-import shutil
-import uuid
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, UploadFile, File, Form, Request
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, UploadFile, File, Request,Form
 from jose import jwt, JWTError
 from sqlalchemy.orm import Session
 
 from app.db.database import SessionLocal
 from app.core.config import settings
+from app.services.storage_service import upload_upload_file
 from app.db import models
-from datetime import datetime, timedelta, timezone
 from app.api.deps import get_db, get_current_user
 
 router = APIRouter(tags=["websockets"])
 logger = logging.getLogger(__name__)
 
-UPLOAD_DIR = "uploads/messages"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 MEDIA_MESSAGE_TYPES = {"image", "video", "file", "audio"}
 
 # ---------------------------------------------------------
@@ -175,7 +170,6 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
                     sender_id=user.id,
                     content=content_to_store,
                     message_type=message_type,
-                    media_expires_at=(datetime.now(timezone.utc) + timedelta(seconds=settings.MESSAGE_MEDIA_TTL_SEC)) if message_type in MEDIA_MESSAGE_TYPES and settings.MESSAGE_MEDIA_TTL_SEC > 0 else None,
                 )
                 db.add(new_msg)
                 db.commit()
@@ -191,7 +185,6 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
                         "sender_avatar": user.avatar,
                         "content": message_data.get("content"),
                         "message_type": message_type,
-                        "media_expires_at": new_msg.media_expires_at.isoformat() if new_msg.media_expires_at else None,
                         "is_edited": new_msg.is_edited,
                         "reply_to": reply_to,
                         "created_at": new_msg.created_at.isoformat() if new_msg.created_at else None
@@ -317,8 +310,6 @@ async def direct_message_websocket(websocket: WebSocket, token: str):
                     receiver_id=receiver.id,
                     content=json.dumps({"reply_to": int(payload.get("reply_to")), "text": content}) if payload.get("reply_to") else content,
                     message_type="reply" if payload.get("reply_to") else (payload.get("message_type") or "text"),
-                    media_expires_at=(datetime.now(timezone.utc) + timedelta(seconds=settings.MESSAGE_MEDIA_TTL_SEC))
-                    if (payload.get("message_type") or "text") in MEDIA_MESSAGE_TYPES and settings.MESSAGE_MEDIA_TTL_SEC > 0 else None,
                 )
                 db.add(new_msg)
                 db.commit()
@@ -343,7 +334,6 @@ async def direct_message_websocket(websocket: WebSocket, token: str):
                         "receiver_id": receiver.id,
                         "content": content,
                         "message_type": new_msg.message_type,
-                        "media_expires_at": new_msg.media_expires_at.isoformat() if new_msg.media_expires_at else None,
                         "reply_to": payload.get("reply_to"),
                         "created_at": new_msg.created_at.isoformat() if new_msg.created_at else None,
                         "sender_name": user.name,
@@ -390,21 +380,14 @@ async def upload_message_attachment(
         if receiver_id == current_user.id:
             raise HTTPException(status_code=422, detail="You cannot send media to yourself")
 
-    extension = os.path.splitext(file.filename or "")[1].lower() or ".bin"
-    safe_name = f"{uuid.uuid4().hex}{extension}"
-    file_path = os.path.join(UPLOAD_DIR, safe_name)
     try:
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        file_url = await upload_upload_file(file, f"chat/{room_id or f'direct/{receiver_id}'}")
     except Exception as exc:
-        logger.exception("Unable to save chat attachment")
-        raise HTTPException(status_code=500, detail="Unable to save the attachment") from exc
+        logger.exception("Unable to upload chat attachment to Supabase Storage")
+        raise HTTPException(status_code=502, detail="Unable to store attachment in cloud storage") from exc
 
-    base_url = str(request.base_url).rstrip("/") if request else settings.api_base_url.rstrip("/")
-    file_url = f"{base_url}/static/messages/{safe_name}"
     return {
         "file_url": file_url,
         "message_type": message_type,
         "filename": file.filename,
-        "media_expires_in": max(0, settings.MESSAGE_MEDIA_TTL_SEC),
     }

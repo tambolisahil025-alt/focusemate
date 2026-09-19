@@ -2,21 +2,14 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
 from sqlalchemy.orm import Session
 from typing import Optional
 from pydantic import BaseModel
-import os
-import uuid
-import shutil
-import mimetypes
 
 from app.db import models
 from app.schemas import schemas
 from app.api.deps import get_db, get_current_user
-from app.core.config import settings
+from app.services.storage_service import upload_upload_file
 
 router = APIRouter(prefix="/users", tags=["users"])
 
-# Ensure the upload directory exists for profile pictures
-UPLOAD_DIR = "uploads/avatars"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
@@ -56,18 +49,10 @@ async def upload_avatar(
     if file.content_type and not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Profile photo must be an image")
 
-    # Generate a unique filename to avoid overwrites
-    guessed_ext = mimetypes.guess_extension(file.content_type or "") if file.content_type else None
-    file_ext = (guessed_ext or f".{file.filename.split('.')[-1] if '.' in file.filename else 'jpg'}").lstrip(".")
-    file_name = f"{uuid.uuid4()}.{file_ext}"
-    file_path = os.path.join(UPLOAD_DIR, file_name)
-    
-    # Save the file locally
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-        
-    base_url = str(request.base_url).rstrip('/') if request else settings.api_base_url
-    avatar_url = f"{base_url}/static/avatars/{file_name}"
+    try:
+        avatar_url = await upload_upload_file(file, f"avatars/{current_user.id}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Unable to store profile photo in cloud storage") from exc
     
     current_user.avatar = avatar_url
     db.commit()
