@@ -3,7 +3,7 @@ import json
 import shutil
 import logging
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request, Body
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import List, Optional
@@ -419,7 +419,12 @@ async def upload_room_resource(
     return new_resource
 
 @router.post("/{room_id}/meeting")
-def create_room_meeting(room_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def create_room_meeting(
+    room_id: int,
+    payload: Optional[schemas.RoomMeetingCreate] = Body(default=None),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     room = db.query(models.Room).filter(models.Room.id == room_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
@@ -428,7 +433,6 @@ def create_room_meeting(room_id: int, db: Session = Depends(get_db), current_use
     if room.owner_id != current_user.id and (not membership or membership.role not in {"owner", "admin"}):
         raise HTTPException(status_code=403, detail="Only a room owner or admin can create a meeting")
 
-    # Idempotent creation: reuse any non-ended meeting so repeated taps cannot spawn duplicates.
     active_meeting = db.query(models.Meeting).filter(
         models.Meeting.room_id == room_id,
         models.Meeting.status != "ended",
@@ -437,32 +441,58 @@ def create_room_meeting(room_id: int, db: Session = Depends(get_db), current_use
         return {
             "meeting_id": active_meeting.id,
             "meeting_code": active_meeting.meeting_code,
+            "topic": active_meeting.topic,
+            "has_password": bool(active_meeting.password_hash),
             "status": active_meeting.status,
             "host_id": active_meeting.host_id,
         }
 
+    data = payload.model_dump() if payload else {}
+    meeting_code = str(data.get("meeting_id") or "").strip().upper() or f"{uuid.uuid4().hex[:8].upper()}-{uuid.uuid4().hex[:3].upper()}"
+    topic = str(data.get("topic") or "FocusMate Meeting").strip()[:120]
+    password = str(data.get("password") or "")
+    if len(meeting_code) < 3 or len(meeting_code) > 32:
+        raise HTTPException(status_code=422, detail="Meeting ID must be 3-32 characters.")
+    if not password:
+        raise HTTPException(status_code=422, detail="A meeting password is required.")
+    if not topic:
+        raise HTTPException(status_code=422, detail="Meeting topic is required.")
+    if db.query(models.Meeting).filter(models.Meeting.meeting_code == meeting_code).first():
+        raise HTTPException(status_code=409, detail="That Meeting ID is already in use. Choose another ID.")
+
+    from app.core.security import get_password_hash
+    meeting = models.Meeting(
+        room_id=room_id,
+        host_id=current_user.id,
+        meeting_code=meeting_code,
+        topic=topic,
+        password_hash=get_password_hash(password),
+        status="live",
+        auto_accept=bool(data.get("auto_accept", False)),
+    )
     try:
-        meeting_code = f"{uuid.uuid4().hex[:8].upper()}-{uuid.uuid4().hex[:3].upper()}"
-        meeting = models.Meeting(
-            room_id=room_id, host_id=current_user.id, meeting_code=meeting_code,
-            status="live", auto_accept=True
-        )
         db.add(meeting)
         db.flush()
         db.add(models.MeetingParticipant(
-            meeting_id=meeting.id, user_id=current_user.id, role="host",
-            status="approved", joined_at=datetime.utcnow()
+            meeting_id=meeting.id,
+            user_id=current_user.id,
+            role="host",
+            status="approved",
+            joined_at=datetime.utcnow(),
         ))
         room.is_live = True
         db.commit()
         db.refresh(meeting)
-        return {
-            "meeting_id": meeting.id,
-            "meeting_code": meeting.meeting_code,
-            "status": meeting.status,
-            "host_id": meeting.host_id,
-        }
     except Exception as exc:
         db.rollback()
         logger.exception("Unable to create meeting for room %s", room_id)
         raise HTTPException(status_code=500, detail="Unable to create the meeting right now") from exc
+
+    return {
+        "meeting_id": meeting.id,
+        "meeting_code": meeting.meeting_code,
+        "topic": meeting.topic,
+        "has_password": True,
+        "status": meeting.status,
+        "host_id": meeting.host_id,
+    }

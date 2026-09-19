@@ -9,6 +9,8 @@ from uuid import uuid4
 from app.api.deps import get_db, get_current_user
 from app.db import models
 from app.core.config import settings
+from app.core.security import verify_password, get_password_hash
+from app.schemas import schemas
 from agora_token_builder import RtcTokenBuilder
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,8 @@ def meeting_summary(meeting: models.Meeting):
         "id": meeting.id,
         "room_id": meeting.room_id,
         "meeting_code": meeting.meeting_code,
+        "topic": meeting.topic,
+        "has_password": bool(meeting.password_hash),
         "status": meeting.status,
         "host_id": meeting.host_id,
         "auto_accept": meeting.auto_accept,
@@ -39,9 +43,13 @@ def require_approved_participant(db: Session, meeting_id: int, user_id: int):
 
 
 @router.post("/")
-def create_meeting(payload: dict = Body(...), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    room_id = int(payload.get('room_id')) if payload.get('room_id') is not None else None
-    auto_accept = bool(payload.get('auto_accept', False))
+def create_meeting(payload: schemas.RoomMeetingCreate | dict = Body(...), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload
+    room_id = int(payload_data.get("room_id")) if payload_data.get("room_id") is not None else None
+    auto_accept = bool(payload_data.get("auto_accept", False))
+    meeting_code = str(payload_data.get("meeting_id") or payload_data.get("meeting_code") or "").strip().upper()
+    topic = str(payload_data.get("topic") or "FocusMate Meeting").strip()[:120]
+    password = str(payload_data.get("password") or "")
     room = db.query(models.Room).filter(models.Room.id == room_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
@@ -51,27 +59,40 @@ def create_meeting(payload: dict = Body(...), db: Session = Depends(get_db), cur
     ).first()
     if room.owner_id != current_user.id and (not membership or membership.role not in {"owner", "admin"}):
         raise HTTPException(status_code=403, detail="Only a room owner or admin can create meetings")
-
     existing = db.query(models.Meeting).filter(
         models.Meeting.room_id == room_id,
         models.Meeting.status != "ended",
     ).order_by(models.Meeting.id.desc()).first()
     if existing:
         return meeting_summary(existing)
-
-    # create meeting record
-    meeting_code = f"{str(uuid4()).split('-')[0].upper()}-{str(uuid4()).split('-')[0][:3].upper()}"
-    meeting = models.Meeting(room_id=room_id, host_id=current_user.id, meeting_code=meeting_code, auto_accept=bool(auto_accept))
+    if not meeting_code:
+        meeting_code = f"{uuid4().hex[:8].upper()}-{uuid4().hex[:3].upper()}"
+    if db.query(models.Meeting).filter(models.Meeting.meeting_code == meeting_code).first():
+        raise HTTPException(status_code=409, detail="That Meeting ID is already in use. Choose another ID.")
+    if len(meeting_code) < 3 or len(meeting_code) > 32:
+        raise HTTPException(status_code=422, detail="Meeting ID must be 3-32 characters.")
+    if not password:
+        raise HTTPException(status_code=422, detail="A meeting password is required.")
+    if not topic:
+        raise HTTPException(status_code=422, detail="Meeting topic is required.")
+    meeting = models.Meeting(
+        room_id=room_id,
+        host_id=current_user.id,
+        meeting_code=meeting_code,
+        topic=topic,
+        password_hash=get_password_hash(password),
+        auto_accept=auto_accept,
+        status="live",
+    )
     db.add(meeting)
+    db.flush()
+    db.add(models.MeetingParticipant(
+        meeting_id=meeting.id, user_id=current_user.id, role="host", status="approved", joined_at=datetime.utcnow()
+    ))
+    room.is_live = True
     db.commit()
     db.refresh(meeting)
-
-    # create host participant entry
-    host_participant = models.MeetingParticipant(meeting_id=meeting.id, user_id=current_user.id, role="host", status="approved", joined_at=datetime.utcnow())
-    db.add(host_participant)
-    db.commit()
-
-    return {"meeting_id": meeting.id, "meeting_code": meeting.meeting_code, "status": meeting.status, "host_id": meeting.host_id}
+    return meeting_summary(meeting)
 
 
 @router.get("/room/{room_id}/active")
@@ -177,7 +198,7 @@ def get_agora_token(meeting_id: int, db: Session = Depends(get_db), current_user
 
 @router.post("/{meeting_id}/invitations")
 def generate_invitation(meeting_id: int, payload: dict = Body(...), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    single_use = bool(payload.get('single_use', True))
+    single_use = bool(payload.get('single_use', False))
     expires_in = payload.get('expires_in')
     meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
     if not meeting:
@@ -196,12 +217,12 @@ def generate_invitation(meeting_id: int, payload: dict = Body(...), db: Session 
     ))
     db.commit()
     invite_url = f"myapp://meeting/{meeting.meeting_code}?invite={raw_token}"
-    return {"invite_url": invite_url, "expires_in": expires_in or settings.MEETING_INVITE_TTL_SEC}
+    return {"invite_url": invite_url, "invite_token": raw_token, "meeting_id": meeting.id, "meeting_code": meeting.meeting_code, "topic": meeting.topic, "expires_in": expires_in or settings.MEETING_INVITE_TTL_SEC}
 
 
 @router.post("/join-with-invite")
-def join_with_invite(payload: dict = Body(...), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    invite_token = payload.get('invite_token')
+def join_with_invite(payload: schemas.MeetingJoinWithInvite, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    invite_token = payload.invite_token
     inv = db.query(models.MeetingInvitation).filter(
         models.MeetingInvitation.token_hash == invite_token,
         models.MeetingInvitation.used == False,
@@ -210,26 +231,78 @@ def join_with_invite(payload: dict = Body(...), db: Session = Depends(get_db), c
         raise HTTPException(status_code=400, detail="Invalid or expired invite token")
     if inv.expires_at and inv.expires_at < datetime.utcnow():
         raise HTTPException(status_code=400, detail="Invalid or expired invite token")
-    if inv.single_use:
-        inv.used = True
     meeting = db.query(models.Meeting).filter(models.Meeting.id == inv.meeting_id).first()
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
+    if meeting.status == "ended":
+        raise HTTPException(status_code=409, detail="This meeting has ended")
+    if meeting.password_hash and not verify_password(payload.password or "", meeting.password_hash):
+        raise HTTPException(status_code=403, detail="Incorrect meeting password")
 
-    # Approved participants can connect to the WebRTC signaling channel.
+    existing = db.query(models.MeetingParticipant).filter(
+        models.MeetingParticipant.meeting_id == meeting.id,
+        models.MeetingParticipant.user_id == current_user.id,
+    ).first()
+    if existing and existing.banned:
+        raise HTTPException(status_code=403, detail="You have been removed from this meeting")
+    if existing and existing.status == "approved":
+        return {"status": "approved", "meeting_id": meeting.id, "meeting_code": meeting.meeting_code, "host_id": meeting.host_id, "topic": meeting.topic}
+    if existing and existing.status == "pending":
+        return {"status": "pending", "meeting_id": meeting.id, "meeting_code": meeting.meeting_code, "message": "Join request already submitted", "topic": meeting.topic}
+
+    if inv.single_use:
+        inv.used = True
     if meeting.auto_accept:
-        participant = models.MeetingParticipant(meeting_id=meeting.id, user_id=current_user.id, role="participant", status="approved", joined_at=datetime.utcnow())
+        participant = existing or models.MeetingParticipant(meeting_id=meeting.id, user_id=current_user.id, role="participant")
+        participant.status = "approved"
+        participant.joined_at = datetime.utcnow()
+        participant.left_at = None
         db.add(participant)
         db.commit()
-        db.refresh(participant)
-        return {"status": "approved", "meeting_id": meeting.id, "meeting_code": meeting.meeting_code, "host_id": meeting.host_id}
+        return {"status": "approved", "meeting_id": meeting.id, "meeting_code": meeting.meeting_code, "host_id": meeting.host_id, "topic": meeting.topic}
 
-    # otherwise create pending participant and notify host via notification
-    pending = models.MeetingParticipant(meeting_id=meeting.id, user_id=current_user.id, role="participant", status="pending")
+    pending = existing or models.MeetingParticipant(meeting_id=meeting.id, user_id=current_user.id, role="participant")
+    pending.status = "pending"
+    pending.joined_at = None
+    pending.left_at = None
     db.add(pending)
-    db.add(models.Notification(user_id=meeting.host_id, notification_type="meeting", title="Join Request", body=f"{current_user.name} requested to join your meeting", actor_id=current_user.id, actor_name=current_user.name, room_id=meeting.room_id))
+    db.add(models.Notification(
+        user_id=meeting.host_id,
+        notification_type="meeting_request",
+        title="Meeting join request",
+        body=f"{current_user.name} requested to join '{meeting.topic or meeting.meeting_code}'",
+        actor_id=current_user.id,
+        actor_name=current_user.name,
+        room_id=meeting.room_id,
+    ))
     db.commit()
-    return {"status": "pending", "message": "Join request submitted"}
+    return {"status": "pending", "meeting_id": meeting.id, "meeting_code": meeting.meeting_code, "message": "Join request submitted", "topic": meeting.topic}
+
+@router.get("/{meeting_id}/requests")
+def get_meeting_requests(meeting_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    if meeting.host_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the meeting host can view join requests")
+    rows = db.query(models.MeetingParticipant).filter(
+        models.MeetingParticipant.meeting_id == meeting_id,
+        models.MeetingParticipant.status == "pending",
+    ).order_by(models.MeetingParticipant.id.asc()).all()
+    result = []
+    for row in rows:
+        u = db.query(models.User).filter(models.User.id == row.user_id).first()
+        if u:
+            result.append({
+                "id": row.id,
+                "participant_id": row.id,
+                "user_id": u.id,
+                "user_name": u.name,
+                "user_avatar": u.avatar,
+                "email": u.email,
+                "created_at": row.joined_at or meeting.created_at,
+            })
+    return {"requests": result}
 
 
 @router.post("/{meeting_id}/approve")
@@ -248,7 +321,7 @@ def approve_join(meeting_id: int, payload: dict = Body(...), db: Session = Depen
     participant.status = "approved"
     participant.joined_at = datetime.utcnow()
     db.add(participant)
-    db.add(models.Notification(user_id=participant.user_id, notification_type="meeting", title="Join Approved", body=f"Your join request was approved for meeting {meeting.id}", actor_id=current_user.id, actor_name=current_user.name, room_id=meeting.room_id))
+    db.add(models.Notification(user_id=participant.user_id, notification_type="meeting_approved", title="Join Approved", body=f"Your join request was approved for meeting {meeting.id}", actor_id=current_user.id, actor_name=current_user.name, room_id=meeting.room_id))
     db.commit()
 
     user = db.query(models.User).filter(models.User.id == participant.user_id).first()
@@ -270,7 +343,7 @@ def reject_join(meeting_id: int, payload: dict = Body(...), db: Session = Depend
 
     participant.status = "rejected"
     db.add(participant)
-    db.add(models.Notification(user_id=participant.user_id, notification_type="meeting", title="Join Rejected", body=f"Your join request was rejected for meeting {meeting.id}", actor_id=current_user.id, actor_name=current_user.name, room_id=meeting.room_id))
+    db.add(models.Notification(user_id=participant.user_id, notification_type="meeting_rejected", title="Join Rejected", body=f"Your join request was rejected for meeting {meeting.id}", actor_id=current_user.id, actor_name=current_user.name, room_id=meeting.room_id))
     db.commit()
     return {"status": "rejected"}
 
@@ -290,7 +363,7 @@ def kick_participant(meeting_id: int, payload: dict = Body(...), db: Session = D
 
     participant.banned = True
     db.add(participant)
-    db.add(models.Notification(user_id=participant.user_id, notification_type="meeting", title="Removed from Meeting", body=f"You were removed from meeting {meeting.id}", actor_id=current_user.id, actor_name=current_user.name, room_id=meeting.room_id))
+    db.add(models.Notification(user_id=participant.user_id, notification_type="meeting_removed", title="Removed from Meeting", body=f"You were removed from meeting {meeting.id}", actor_id=current_user.id, actor_name=current_user.name, room_id=meeting.room_id))
     db.commit()
     return {"status": "kicked"}
 

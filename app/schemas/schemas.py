@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, ConfigDict
+from pydantic import BaseModel, EmailStr, ConfigDict, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -66,6 +66,17 @@ class MessageResponse(BaseModel):
 
 class MessageUpdate(BaseModel):
     content: str
+
+class RoomMeetingCreate(BaseModel):
+    room_id: Optional[int] = None
+    meeting_id: Optional[str] = None
+    password: str = Field(default="", min_length=4, max_length=72)
+    topic: str = Field(default="FocusMate Meeting", min_length=1, max_length=120)
+    auto_accept: bool = False
+
+class MeetingJoinWithInvite(BaseModel):
+    invite_token: str
+    password: Optional[str] = None
 
 # --- NEW: DIRECT MESSAGES SCHEMAS ---
 class DirectMessageCreate(BaseModel):
