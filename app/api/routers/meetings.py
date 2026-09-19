@@ -17,6 +17,27 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/meetings", tags=["meetings"])
 
+def ensure_meeting_schema(db: Session):
+    """Make the two additive meeting columns available on older Render databases.
+
+    The Alembic migration remains the authoritative schema change; this small
+    compatibility guard prevents an older deployment that skipped the latest
+    migration from failing every Meeting ORM query with PostgreSQL F405.
+    """
+    try:
+        bind = db.get_bind()
+        inspector = __import__("sqlalchemy").inspect(bind)
+        columns = {c["name"] for c in inspector.get_columns("meetings")}
+        from sqlalchemy import text as sql_text
+        if "topic" not in columns:
+            bind.execute(sql_text("ALTER TABLE meetings ADD COLUMN IF NOT EXISTS topic VARCHAR(120)"))
+        if "password_hash" not in columns:
+            bind.execute(sql_text("ALTER TABLE meetings ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255)"))
+    except Exception:
+        db.rollback()
+        logger.exception("Unable to reconcile meeting schema")
+        raise
+
 def meeting_summary(meeting: models.Meeting):
     return {
         "meeting_id": meeting.id,
@@ -44,6 +65,7 @@ def require_approved_participant(db: Session, meeting_id: int, user_id: int):
 
 @router.post("/")
 def create_meeting(payload: schemas.RoomMeetingCreate | dict = Body(...), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    ensure_meeting_schema(db)
     payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload
     room_id = int(payload_data.get("room_id")) if payload_data.get("room_id") is not None else None
     auto_accept = bool(payload_data.get("auto_accept", False))
@@ -97,6 +119,7 @@ def create_meeting(payload: schemas.RoomMeetingCreate | dict = Body(...), db: Se
 
 @router.get("/room/{room_id}/active")
 def get_active_room_meeting(room_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    ensure_meeting_schema(db)
     membership = db.query(models.RoomMember).filter(
         models.RoomMember.room_id == room_id,
         models.RoomMember.user_id == current_user.id,
@@ -114,6 +137,7 @@ def get_active_room_meeting(room_id: int, db: Session = Depends(get_db), current
 
 @router.get("/{meeting_id}")
 def get_meeting(meeting_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    ensure_meeting_schema(db)
     meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
@@ -122,6 +146,7 @@ def get_meeting(meeting_id: int, db: Session = Depends(get_db), current_user: mo
 
 @router.post("/{meeting_id}/join")
 def join_meeting(meeting_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    ensure_meeting_schema(db)
     meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
@@ -160,6 +185,7 @@ def join_meeting(meeting_id: int, db: Session = Depends(get_db), current_user: m
 
 @router.get("/{meeting_id}/agora-token")
 def get_agora_token(meeting_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    ensure_meeting_schema(db)
     meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
@@ -198,6 +224,7 @@ def get_agora_token(meeting_id: int, db: Session = Depends(get_db), current_user
 
 @router.post("/{meeting_id}/invitations")
 def generate_invitation(meeting_id: int, payload: dict = Body(...), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    ensure_meeting_schema(db)
     single_use = bool(payload.get('single_use', False))
     expires_in = payload.get('expires_in')
     meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
@@ -222,6 +249,7 @@ def generate_invitation(meeting_id: int, payload: dict = Body(...), db: Session 
 
 @router.post("/join-with-invite")
 def join_with_invite(payload: schemas.MeetingJoinWithInvite, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    ensure_meeting_schema(db)
     invite_token = payload.invite_token
     inv = db.query(models.MeetingInvitation).filter(
         models.MeetingInvitation.token_hash == invite_token,
@@ -280,6 +308,7 @@ def join_with_invite(payload: schemas.MeetingJoinWithInvite, db: Session = Depen
 
 @router.get("/{meeting_id}/requests")
 def get_meeting_requests(meeting_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    ensure_meeting_schema(db)
     meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")

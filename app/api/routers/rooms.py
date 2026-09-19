@@ -14,6 +14,7 @@ import uuid
 from pydantic import BaseModel
 from app.core.config import settings
 from app.api.routers.messages import active_media_filter
+from app.api.routers.meetings import ensure_meeting_schema
 
 logger = logging.getLogger(__name__)
 
@@ -425,6 +426,8 @@ def create_room_meeting(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    ensure_meeting_schema(db)
+
     room = db.query(models.Room).filter(models.Room.id == room_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
