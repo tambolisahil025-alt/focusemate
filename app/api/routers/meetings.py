@@ -38,14 +38,8 @@ def _ensure_meeting_schema(db: Session) -> None:
             conn.execute(text("ALTER TABLE meetings ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255)"))
 
 
-def ensure_meeting_schema(db: Session) -> None:
-    """Public compatibility wrapper used by rooms.py.
-
-    The schema implementation is kept private so the rest of the meeting
-    router has one source of truth, while older patched rooms.py files can
-    continue importing the public helper.
-    """
-    _ensure_meeting_schema(db)
+# Backward-compatible public name used by older rooms.py versions.
+ensure_meeting_schema = _ensure_meeting_schema
 
 
 def meeting_summary(meeting: models.Meeting, invite_url: str | None = None, invite_token: str | None = None):
@@ -76,7 +70,7 @@ def require_approved_participant(db: Session, meeting_id: int, user_id: int):
     return participant
 
 
-def _create_invite(db: Session, meeting: models.Meeting, host_id: int, single_use: bool = False):
+def _create_invite(db: Session, meeting: models.Meeting, host_id: int, single_use: bool = False, password: str | None = None):
     raw_token = uuid4().hex
     expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=settings.MEETING_INVITE_TTL_SEC)
     db.add(models.MeetingInvitation(
@@ -89,8 +83,14 @@ def _create_invite(db: Session, meeting: models.Meeting, host_id: int, single_us
     if settings.FRONTEND_APP_URL:
         base = settings.FRONTEND_APP_URL.rstrip("/")
         invite_url = f"{base}/meeting/{meeting.meeting_code}?invite={raw_token}"
+        if password:
+            from urllib.parse import quote
+            invite_url += f"&password={quote(password, safe='')}"
     else:
         invite_url = f"myapp://meeting/{meeting.meeting_code}?invite={raw_token}"
+        if password:
+            from urllib.parse import quote
+            invite_url += f"&password={quote(password, safe='')}"
     return raw_token, invite_url
 
 
@@ -113,34 +113,28 @@ def create_meeting(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Create a real room meeting and publish its invite card into the room chat."""
-    _ensure_meeting_schema(db)
+    """Create a meeting from only topic + password. Meeting ID and invite link are generated server-side."""
+    ensure_meeting_schema(db)
     try:
         room_id = int(payload.get("room_id")) if payload.get("room_id") is not None else None
     except (TypeError, ValueError):
         raise HTTPException(status_code=422, detail="A valid room_id is required")
-
     if room_id is None:
         raise HTTPException(status_code=422, detail="A valid room_id is required")
 
     topic = str(payload.get("topic") or "").strip()
     password = str(payload.get("password") or "")
-    meeting_code = str(payload.get("meeting_id") or payload.get("meeting_code") or "").strip().upper()
-    auto_accept = bool(payload.get("auto_accept", False))
-
+    auto_accept = bool(payload.get("auto_accept", True))
     if not topic:
         raise HTTPException(status_code=422, detail="Meeting topic is required")
     if len(topic) > 120:
         raise HTTPException(status_code=422, detail="Meeting topic must be 120 characters or fewer")
-    if len(meeting_code) < 3 or len(meeting_code) > 32:
-        raise HTTPException(status_code=422, detail="Meeting ID must be 3-32 characters")
-    if not password or len(password) < 4:
+    if len(password) < 4:
         raise HTTPException(status_code=422, detail="Meeting password must be at least 4 characters")
 
     room = db.query(models.Room).filter(models.Room.id == room_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
-
     membership = db.query(models.RoomMember).filter(
         models.RoomMember.room_id == room_id,
         models.RoomMember.user_id == current_user.id,
@@ -153,11 +147,16 @@ def create_meeting(
         models.Meeting.status != "ended",
     ).order_by(models.Meeting.id.desc()).first()
     if active:
-        # Existing meeting is returned rather than creating accidental duplicates.
-        return meeting_summary(active)
+        raise HTTPException(status_code=409, detail="An active meeting already exists in this room. End it before creating another.")
 
-    if db.query(models.Meeting).filter(models.Meeting.meeting_code == meeting_code).first():
-        raise HTTPException(status_code=409, detail="That Meeting ID is already in use. Choose another ID.")
+    # Generate a short, human-friendly ID; never ask the owner to invent one.
+    import secrets, string
+    alphabet = string.ascii_uppercase + string.digits
+    meeting_code = "FM-" + "".join(secrets.choice(alphabet) for _ in range(6))
+    for _ in range(8):
+        if not db.query(models.Meeting).filter(models.Meeting.meeting_code == meeting_code).first():
+            break
+        meeting_code = "FM-" + "".join(secrets.choice(alphabet) for _ in range(6))
 
     try:
         meeting = models.Meeting(
@@ -171,7 +170,6 @@ def create_meeting(
         )
         db.add(meeting)
         db.flush()
-
         db.add(models.MeetingParticipant(
             meeting_id=meeting.id,
             user_id=current_user.id,
@@ -180,17 +178,9 @@ def create_meeting(
             joined_at=datetime.utcnow(),
         ))
         room.is_live = True
-
-        token, invite_url = _create_invite(db, meeting, current_user.id, single_use=False)
-        db.add(models.Message(
-            room_id=room_id,
-            sender_id=current_user.id,
-            content=_meeting_chat_payload(meeting, token, invite_url, password),
-            message_type="meeting_invite",
-        ))
+        token, invite_url = _create_invite(db, meeting, current_user.id, single_use=False, password=password)
         db.commit()
         db.refresh(meeting)
-
         return meeting_summary(meeting, invite_url=invite_url, invite_token=token)
     except HTTPException:
         db.rollback()
@@ -198,7 +188,7 @@ def create_meeting(
     except Exception as exc:
         db.rollback()
         logger.exception("Unable to create meeting for room %s", room_id)
-        raise HTTPException(status_code=500, detail=f"Unable to create the meeting: {exc}") from exc
+        raise HTTPException(status_code=500, detail="Unable to create the meeting") from exc
 
 
 @router.get("/room/{room_id}/active")
