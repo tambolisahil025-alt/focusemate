@@ -26,3 +26,5 @@ services:
         sync: false
       - key: AGORA_TOKEN_TTL_SEC
         value: "3600"
+      - key: MESSAGE_MEDIA_TTL_SEC
+        value: "86400"

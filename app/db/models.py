@@ -83,7 +83,8 @@ class Message(Base):
     room_id = Column(Integer, ForeignKey("rooms.id"))
     sender_id = Column(Integer, ForeignKey("users.id"), nullable=True) # Nullable for system messages
     content = Column(Text, nullable=False)
-    message_type = Column(String, default="text") # text, system
+    message_type = Column(String, default="text") # text, image, video, reply, system
+    media_expires_at = Column(DateTime(timezone=True), nullable=True)
     is_edited = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -179,6 +180,7 @@ class DirectMessage(Base):
     receiver_id = Column(Integer, ForeignKey("users.id"))
     content = Column(Text, nullable=False)
     message_type = Column(String, default="text")
+    media_expires_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     is_read = Column(Boolean, default=False)
     

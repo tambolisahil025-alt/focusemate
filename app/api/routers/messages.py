@@ -2,13 +2,30 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
+from datetime import datetime, timedelta, timezone
+from sqlalchemy import or_
 from app.db import models
 from app.schemas import schemas
 from app.api.deps import get_db, get_current_user
 from app.api.routers.ws import manager
+from app.core.config import settings
 import logging
 
 logger = logging.getLogger(__name__)
+
+MEDIA_MESSAGE_TYPES = {"image", "video", "file", "audio"}
+
+def media_expiration_for(message_type: str):
+    if message_type in MEDIA_MESSAGE_TYPES and settings.MESSAGE_MEDIA_TTL_SEC > 0:
+        return datetime.now(timezone.utc) + timedelta(seconds=settings.MESSAGE_MEDIA_TTL_SEC)
+    return None
+
+def active_media_filter(model):
+    return or_(
+        ~model.message_type.in_(MEDIA_MESSAGE_TYPES),
+        model.media_expires_at.is_(None),
+        model.media_expires_at > datetime.now(timezone.utc),
+    )
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 
@@ -37,6 +54,7 @@ def message_payload(message: models.Message, sender: Optional[models.User] = Non
         "sender_avatar": sender.avatar if sender else None,
         "content": content,
         "message_type": message.message_type,
+        "media_expires_at": message.media_expires_at,
         "is_edited": message.is_edited,
         "reply_to": reply_to,
         "created_at": message.created_at,
@@ -75,7 +93,8 @@ async def create_message(
         room_id=payload.room_id,
         sender_id=current_user.id,
         content=content_to_store,
-        message_type=payload.message_type
+        message_type=payload.message_type,
+        media_expires_at=media_expiration_for(payload.message_type),
     )
     db.add(new_message)
     db.commit()
@@ -89,6 +108,7 @@ async def create_message(
         "sender_avatar": current_user.avatar,
         "content": payload.content,
         "message_type": new_message.message_type,
+        "media_expires_at": new_message.media_expires_at,
         "is_edited": new_message.is_edited,
         "reply_to": payload.reply_to,
         "created_at": new_message.created_at
@@ -120,14 +140,20 @@ async def update_message(message_id: int, payload: schemas.MessageUpdate, db: Se
     return data
 
 @router.delete("/direct/{message_id}")
-def delete_direct_message(message_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+async def delete_direct_message(message_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     msg = db.query(models.DirectMessage).filter(models.DirectMessage.id == message_id).first()
     if not msg:
         raise HTTPException(status_code=404, detail="Message not found")
     if msg.sender_id != current_user.id:
         raise HTTPException(status_code=403, detail="You can only delete your own messages")
+    sender_id = msg.sender_id
+    receiver_id = msg.receiver_id
     db.delete(msg)
     db.commit()
+    await manager.broadcast_direct([sender_id, receiver_id], {
+        "type": "direct_message_deleted",
+        "message_id": message_id,
+    })
     return {"detail": "Message deleted"}
 
 @router.delete("/{message_id}")
@@ -142,6 +168,116 @@ async def delete_message(message_id: int, db: Session = Depends(get_db), current
     db.commit()
     await manager.broadcast_to_room(room_id, {"type": "message_deleted", "action": "message_deleted", "message_id": message_id})
     return {"detail": "Message deleted"}
+
+@router.post("/direct", response_model=schemas.DirectMessageResponse)
+async def create_direct_message(
+    payload: schemas.DirectMessageCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    if payload.receiver_id == current_user.id:
+        raise HTTPException(status_code=422, detail="You cannot send a direct message to yourself")
+    receiver = db.query(models.User).filter(models.User.id == payload.receiver_id).first()
+    if not receiver:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+
+    content_to_store = payload.content
+    message_type = payload.message_type
+    if payload.reply_to:
+        import json
+        content_to_store = json.dumps({"reply_to": int(payload.reply_to), "text": payload.content})
+        message_type = "reply"
+
+    new_message = models.DirectMessage(
+        sender_id=current_user.id,
+        receiver_id=payload.receiver_id,
+        content=content_to_store,
+        message_type=message_type,
+        media_expires_at=media_expiration_for(message_type),
+    )
+    db.add(new_message)
+    db.commit()
+    db.refresh(new_message)
+
+    response = {
+        "id": new_message.id,
+        "sender_id": new_message.sender_id,
+        "receiver_id": new_message.receiver_id,
+        "content": payload.content,
+        "message_type": new_message.message_type,
+        "media_expires_at": new_message.media_expires_at,
+        "created_at": new_message.created_at,
+        "sender_name": current_user.name,
+        "sender_avatar": current_user.avatar,
+        "reply_to": payload.reply_to,
+    }
+    db.add(models.Notification(
+        user_id=payload.receiver_id,
+        notification_type="direct_message",
+        title=f"New message from {current_user.name}",
+        body=payload.content[:140],
+        actor_id=current_user.id,
+        actor_name=current_user.name,
+    ))
+    db.commit()
+    await manager.broadcast_direct(
+        [current_user.id, payload.receiver_id],
+        {
+            "type": "direct_message",
+            "data": {**response, "created_at": response["created_at"].isoformat() if response["created_at"] else None,
+                      "media_expires_at": response["media_expires_at"].isoformat() if response["media_expires_at"] else None},
+        },
+    )
+    return response
+
+@router.get("/direct/{recipient_id}")
+def get_direct_messages(
+    recipient_id: int,
+    limit: int = 100,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    recipient = db.query(models.User).filter(models.User.id == recipient_id).first()
+    if not recipient:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
+    messages = db.query(models.DirectMessage, models.User).join(
+        models.User, models.DirectMessage.sender_id == models.User.id
+    ).filter(
+        or_(
+            (models.DirectMessage.sender_id == current_user.id) & (models.DirectMessage.receiver_id == recipient_id),
+            (models.DirectMessage.sender_id == recipient_id) & (models.DirectMessage.receiver_id == current_user.id),
+        ),
+        active_media_filter(models.DirectMessage),
+    ).order_by(models.DirectMessage.created_at.desc()).offset(offset).limit(limit).all()
+
+    result = []
+    for message, sender in reversed(messages):
+        content = message.content
+        reply_to = None
+        if message.message_type == "reply":
+            try:
+                import json
+                parsed = json.loads(message.content)
+                reply_to = parsed.get("reply_to") if isinstance(parsed, dict) else None
+                content = parsed.get("text", message.content) if isinstance(parsed, dict) else message.content
+            except (TypeError, ValueError):
+                pass
+        result.append({
+            "id": message.id,
+            "sender_id": message.sender_id,
+            "receiver_id": message.receiver_id,
+            "content": content,
+            "message_type": message.message_type,
+            "media_expires_at": message.media_expires_at,
+            "created_at": message.created_at,
+            "sender_name": sender.name if sender else None,
+            "sender_avatar": sender.avatar if sender else None,
+            "reply_to": reply_to,
+        })
+    return {"messages": result, "limit": limit, "offset": offset}
 
 @router.get("/room/{room_id}")
 def get_room_messages(
@@ -165,8 +301,10 @@ def get_room_messages(
         raise HTTPException(status_code=403, detail="You are not a member of this room")
     
     messages = db.query(models.Message).filter(
-        models.Message.room_id == room_id
-    ).order_by(models.Message.created_at.asc()).offset(offset).limit(limit).all()
+        models.Message.room_id == room_id,
+        active_media_filter(models.Message),
+    ).order_by(models.Message.created_at.desc()).offset(offset).limit(limit).all()
+    messages = list(reversed(messages))
     
     result = []
     for msg in messages:

@@ -58,6 +58,7 @@ class MessageResponse(BaseModel):
     sender_avatar: Optional[str]
     content: str
     message_type: str
+    media_expires_at: Optional[datetime] = None
     is_edited: bool = False
     reply_to: Optional[int] = None
     created_at: datetime
@@ -79,6 +80,7 @@ class DirectMessageResponse(BaseModel):
     receiver_id: int
     content: str
     message_type: str
+    media_expires_at: Optional[datetime] = None
     created_at: datetime
     sender_name: Optional[str] = None
     sender_avatar: Optional[str] = None

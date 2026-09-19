@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.db.database import SessionLocal
 from app.core.config import settings
 from app.db import models
+from datetime import datetime, timedelta, timezone
 from app.api.deps import get_db, get_current_user
 
 router = APIRouter(tags=["websockets"])
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 UPLOAD_DIR = "uploads/messages"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+MEDIA_MESSAGE_TYPES = {"image", "video", "file", "audio"}
 
 # ---------------------------------------------------------
 # Connection Manager
@@ -172,7 +174,8 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
                     room_id=room_id,
                     sender_id=user.id,
                     content=content_to_store,
-                    message_type=message_type
+                    message_type=message_type,
+                    media_expires_at=(datetime.now(timezone.utc) + timedelta(seconds=settings.MESSAGE_MEDIA_TTL_SEC)) if message_type in MEDIA_MESSAGE_TYPES and settings.MESSAGE_MEDIA_TTL_SEC > 0 else None,
                 )
                 db.add(new_msg)
                 db.commit()
@@ -188,6 +191,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
                         "sender_avatar": user.avatar,
                         "content": message_data.get("content"),
                         "message_type": message_type,
+                        "media_expires_at": new_msg.media_expires_at.isoformat() if new_msg.media_expires_at else None,
                         "is_edited": new_msg.is_edited,
                         "reply_to": reply_to,
                         "created_at": new_msg.created_at.isoformat() if new_msg.created_at else None
@@ -312,7 +316,9 @@ async def direct_message_websocket(websocket: WebSocket, token: str):
                     sender_id=user.id,
                     receiver_id=receiver.id,
                     content=json.dumps({"reply_to": int(payload.get("reply_to")), "text": content}) if payload.get("reply_to") else content,
-                    message_type="reply" if payload.get("reply_to") else (payload.get("message_type") or "text")
+                    message_type="reply" if payload.get("reply_to") else (payload.get("message_type") or "text"),
+                    media_expires_at=(datetime.now(timezone.utc) + timedelta(seconds=settings.MESSAGE_MEDIA_TTL_SEC))
+                    if (payload.get("message_type") or "text") in MEDIA_MESSAGE_TYPES and settings.MESSAGE_MEDIA_TTL_SEC > 0 else None,
                 )
                 db.add(new_msg)
                 db.commit()
@@ -337,6 +343,7 @@ async def direct_message_websocket(websocket: WebSocket, token: str):
                         "receiver_id": receiver.id,
                         "content": content,
                         "message_type": new_msg.message_type,
+                        "media_expires_at": new_msg.media_expires_at.isoformat() if new_msg.media_expires_at else None,
                         "reply_to": payload.get("reply_to"),
                         "created_at": new_msg.created_at.isoformat() if new_msg.created_at else None,
                         "sender_name": user.name,
@@ -361,19 +368,43 @@ async def upload_message_attachment(
     message_type: str = Form("image"),
     request: Request = None,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
+    current_user: models.User = Depends(get_current_user),
 ):
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="No file provided")
+    """Upload chat media only for a conversation the caller may access."""
+    if message_type not in MEDIA_MESSAGE_TYPES:
+        raise HTTPException(status_code=422, detail="Unsupported message media type")
     if not room_id and not receiver_id:
-        raise HTTPException(status_code=400, detail="room_id or receiver_id is required")
+        raise HTTPException(status_code=422, detail="room_id or receiver_id is required")
 
-    file_ext = file.filename.split('.')[-1]
-    file_name = f"{uuid.uuid4()}.{file_ext}"
-    file_path = os.path.join(UPLOAD_DIR, file_name)
-    with open(file_path, 'wb') as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    if room_id:
+        membership = db.query(models.RoomMember).filter(
+            models.RoomMember.room_id == room_id,
+            models.RoomMember.user_id == current_user.id,
+        ).first()
+        if not membership:
+            raise HTTPException(status_code=403, detail="You are not a member of this room")
+    if receiver_id:
+        receiver = db.query(models.User).filter(models.User.id == receiver_id).first()
+        if not receiver:
+            raise HTTPException(status_code=404, detail="Recipient not found")
+        if receiver_id == current_user.id:
+            raise HTTPException(status_code=422, detail="You cannot send media to yourself")
 
-    base_url = str(request.base_url).rstrip('/') if request else ''
-    file_url = f"{base_url}/static/messages/{file_name}"
-    return {"file_url": file_url, "message_type": message_type}
+    extension = os.path.splitext(file.filename or "")[1].lower() or ".bin"
+    safe_name = f"{uuid.uuid4().hex}{extension}"
+    file_path = os.path.join(UPLOAD_DIR, safe_name)
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as exc:
+        logger.exception("Unable to save chat attachment")
+        raise HTTPException(status_code=500, detail="Unable to save the attachment") from exc
+
+    base_url = str(request.base_url).rstrip("/") if request else settings.api_base_url.rstrip("/")
+    file_url = f"{base_url}/static/messages/{safe_name}"
+    return {
+        "file_url": file_url,
+        "message_type": message_type,
+        "filename": file.filename,
+        "media_expires_in": max(0, settings.MESSAGE_MEDIA_TTL_SEC),
+    }

@@ -13,6 +13,7 @@ from app.api.deps import get_db, get_current_user
 import uuid
 from pydantic import BaseModel
 from app.core.config import settings
+from app.api.routers.messages import active_media_filter
 
 logger = logging.getLogger(__name__)
 
@@ -315,8 +316,10 @@ def get_room_messages(
     messages = db.query(models.Message, models.User).outerjoin(
         models.User, models.Message.sender_id == models.User.id
     ).filter(
-        models.Message.room_id == room_id
-    ).order_by(models.Message.created_at.asc()).offset(offset).limit(limit).all()
+        models.Message.room_id == room_id,
+        active_media_filter(models.Message),
+    ).order_by(models.Message.created_at.desc()).offset(offset).limit(limit).all()
+    messages = list(reversed(messages))
     result = []
     for message, sender in messages:
         content = message.content
@@ -336,6 +339,7 @@ def get_room_messages(
             "sender_avatar": sender.avatar if sender else None,
             "content": content,
             "message_type": message.message_type,
+            "media_expires_at": message.media_expires_at,
             "is_edited": message.is_edited,
             "reply_to": reply_to,
             "created_at": message.created_at,
@@ -419,24 +423,36 @@ def create_room_meeting(room_id: int, db: Session = Depends(get_db), current_use
     room = db.query(models.Room).filter(models.Room.id == room_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
-    require_room_member(db, room_id, current_user.id)
 
-    membership = db.query(models.RoomMember).filter(
-        models.RoomMember.room_id == room_id,
-        models.RoomMember.user_id == current_user.id
-    ).first()
-    if not membership:
-        raise HTTPException(status_code=403, detail="Join the room before creating a meeting")
-    if membership.role not in {"owner", "admin"}:
-        raise HTTPException(status_code=403, detail="Only a room owner or admin can create meetings")
+    membership = require_room_member(db, room_id, current_user.id)
+    if room.owner_id != current_user.id and membership.role not in {"owner", "admin"}:
+        raise HTTPException(status_code=403, detail="Only a room owner or admin can create a meeting")
+
+    # Idempotent creation: reuse any non-ended meeting so repeated taps cannot spawn duplicates.
+    active_meeting = db.query(models.Meeting).filter(
+        models.Meeting.room_id == room_id,
+        models.Meeting.status != "ended",
+    ).order_by(models.Meeting.id.desc()).first()
+    if active_meeting:
+        return {
+            "meeting_id": active_meeting.id,
+            "meeting_code": active_meeting.meeting_code,
+            "status": active_meeting.status,
+            "host_id": active_meeting.host_id,
+        }
 
     try:
         meeting_code = f"{uuid.uuid4().hex[:8].upper()}-{uuid.uuid4().hex[:3].upper()}"
-        meeting = models.Meeting(room_id=room_id, host_id=current_user.id, meeting_code=meeting_code, status="live", auto_accept=True)
+        meeting = models.Meeting(
+            room_id=room_id, host_id=current_user.id, meeting_code=meeting_code,
+            status="live", auto_accept=True
+        )
         db.add(meeting)
         db.flush()
-        db.add(models.MeetingParticipant(meeting_id=meeting.id, user_id=current_user.id, role="host", status="approved", joined_at=datetime.utcnow()))
-
+        db.add(models.MeetingParticipant(
+            meeting_id=meeting.id, user_id=current_user.id, role="host",
+            status="approved", joined_at=datetime.utcnow()
+        ))
         room.is_live = True
         db.commit()
         db.refresh(meeting)
@@ -446,138 +462,7 @@ def create_room_meeting(room_id: int, db: Session = Depends(get_db), current_use
             "status": meeting.status,
             "host_id": meeting.host_id,
         }
-    except HTTPException:
-        db.rollback()
-        raise
     except Exception as exc:
         db.rollback()
-        logger.exception("Meeting creation failed for room %s and user %s", room_id, current_user.id)
+        logger.exception("Unable to create meeting for room %s", room_id)
         raise HTTPException(status_code=500, detail="Unable to create the meeting right now") from exc
-# --- ADD THESE TO THE BOTTOM OF rooms.py ---
-
-# 1. Define what the incoming resource data looks like
-class ResourceCreate(BaseModel):
-    title: str
-    description: Optional[str] = None
-    resource_type: str = "link"
-    link: Optional[str] = None
-
-class RoomMemberRoleUpdate(BaseModel):
-    role: str
-
-# 2. Handle the POST request to add a new resource
-@router.post("/{room_id}/resources/")
-def add_room_resource(
-    room_id: int, 
-    payload: ResourceCreate, 
-    db: Session = Depends(get_db), 
-    current_user: models.User = Depends(get_current_user)
-):
-    room = db.query(models.Room).filter(models.Room.id == room_id).first()
-    if not room:
-        raise HTTPException(status_code=404, detail="Room not found")
-    require_room_member(db, room_id, current_user.id)
-        
-    new_resource = models.Resource(
-        room_id=room_id,
-        added_by_id=current_user.id,
-        title=payload.title,
-        description=payload.description,
-        resource_type=payload.resource_type,
-        link=payload.link
-    )
-    db.add(new_resource)
-    db.commit()
-    db.refresh(new_resource)
-    
-    return new_resource
-
-# 3. Handle the DELETE request so you can remove resources later
-@router.delete("/{room_id}/resources/{resource_id}")
-def delete_room_resource(
-    room_id: int, 
-    resource_id: int, 
-    db: Session = Depends(get_db), 
-    current_user: models.User = Depends(get_current_user)
-):
-    resource = db.query(models.Resource).filter(
-        models.Resource.id == resource_id, 
-        models.Resource.room_id == room_id
-    ).first()
-    
-    if not resource:
-        raise HTTPException(status_code=404, detail="Resource not found")
-        
-    # Security check: Only let the creator or a room admin delete it
-    if resource.added_by_id != current_user.id:
-        room_member = db.query(models.RoomMember).filter(
-            models.RoomMember.room_id == room_id,
-            models.RoomMember.user_id == current_user.id
-        ).first()
-        
-        if not room_member or room_member.role not in ["admin", "owner"]:
-            raise HTTPException(status_code=403, detail="Not authorized to delete this resource")
-
-    db.delete(resource)
-    db.commit()
-    return {"detail": "Resource deleted successfully"}
-
-@router.patch("/{room_id}/members/{user_id}")
-def update_room_member_role(
-    room_id: int,
-    user_id: int,
-    payload: RoomMemberRoleUpdate,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    if payload.role not in ["admin", "member"]:
-        raise HTTPException(status_code=400, detail="Role must be admin or member")
-
-    current_member = db.query(models.RoomMember).filter(
-        models.RoomMember.room_id == room_id,
-        models.RoomMember.user_id == current_user.id
-    ).first()
-    if not current_member or current_member.role != "owner":
-        raise HTTPException(status_code=403, detail="Only the room owner can change roles")
-
-    member = db.query(models.RoomMember).filter(
-        models.RoomMember.room_id == room_id,
-        models.RoomMember.user_id == user_id
-    ).first()
-    if not member:
-        raise HTTPException(status_code=404, detail="Room member not found")
-    if member.role == "owner":
-        raise HTTPException(status_code=400, detail="Cannot change the room owner's role")
-
-    member.role = payload.role
-    db.commit()
-    return {"detail": "Member role updated successfully"}
-
-@router.delete("/{room_id}/members/{user_id}")
-def remove_room_member(
-    room_id: int,
-    user_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    current_member = db.query(models.RoomMember).filter(
-        models.RoomMember.room_id == room_id,
-        models.RoomMember.user_id == current_user.id
-    ).first()
-    if not current_member or current_member.role not in ["owner", "admin"]:
-        raise HTTPException(status_code=403, detail="Only room admins can remove members")
-
-    member = db.query(models.RoomMember).filter(
-        models.RoomMember.room_id == room_id,
-        models.RoomMember.user_id == user_id
-    ).first()
-    if not member:
-        raise HTTPException(status_code=404, detail="Room member not found")
-    if member.role == "owner":
-        raise HTTPException(status_code=400, detail="Cannot remove the room owner")
-    if current_member.role == "admin" and member.role == "admin":
-        raise HTTPException(status_code=403, detail="Admins cannot remove other admins")
-
-    db.delete(member)
-    db.commit()
-    return {"detail": "Member removed successfully"}
