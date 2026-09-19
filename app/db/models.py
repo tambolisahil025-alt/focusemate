@@ -193,8 +193,8 @@ class Meeting(Base):
     room_id = Column(Integer, ForeignKey("rooms.id"), nullable=False)
     host_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     meeting_code = Column(String, nullable=True, unique=True, index=True)
-    topic = Column(String, nullable=True)
-    password_hash = Column(String, nullable=True)
+    topic = Column(String(120), nullable=True)
+    password_hash = Column(String(255), nullable=True)
     status = Column(String, default="lobby") # lobby, live, ended
     auto_accept = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
