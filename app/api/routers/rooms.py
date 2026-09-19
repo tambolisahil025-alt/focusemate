@@ -424,8 +424,8 @@ def create_room_meeting(room_id: int, db: Session = Depends(get_db), current_use
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
 
-    membership = require_room_member(db, room_id, current_user.id)
-    if room.owner_id != current_user.id and membership.role not in {"owner", "admin"}:
+    membership = get_room_member(db, room_id, current_user.id)
+    if room.owner_id != current_user.id and (not membership or membership.role not in {"owner", "admin"}):
         raise HTTPException(status_code=403, detail="Only a room owner or admin can create a meeting")
 
     # Idempotent creation: reuse any non-ended meeting so repeated taps cannot spawn duplicates.
