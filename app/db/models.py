@@ -190,6 +190,10 @@ class Meeting(Base):
     id = Column(Integer, primary_key=True, index=True)
     room_id = Column(Integer, ForeignKey("rooms.id"), nullable=False)
     host_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    # Legacy Jitsi column is still present in some production databases and is
+    # NOT NULL there. Keep the ORM field so old Jitsi-related code continues to
+    # work, while the current Agora flow also supplies a compatible room name.
+    jitsi_room = Column(String, nullable=True)
     meeting_code = Column(String, nullable=True, unique=True, index=True)
     topic = Column(String(120), nullable=True)
     password_hash = Column(String(255), nullable=True)

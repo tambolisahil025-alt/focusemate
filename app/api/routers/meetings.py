@@ -36,6 +36,8 @@ def _ensure_meeting_schema(db: Session) -> None:
             conn.execute(text("ALTER TABLE meetings ADD COLUMN IF NOT EXISTS topic VARCHAR(120)"))
         if "password_hash" not in columns:
             conn.execute(text("ALTER TABLE meetings ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255)"))
+        if "jitsi_room" not in columns:
+            conn.execute(text("ALTER TABLE meetings ADD COLUMN IF NOT EXISTS jitsi_room VARCHAR(255)"))
 
 
 # Backward-compatible public name used by older rooms.py versions.
@@ -122,18 +124,14 @@ def create_meeting(
     if room_id is None:
         raise HTTPException(status_code=422, detail="A valid room_id is required")
 
-    # Topic/password remain supported for callers that provide them, but they
-    # are optional so the existing Room -> Create Meeting button continues to
-    # work without introducing a new form.
-    topic = str(payload.get("topic") or "FocusMate Meeting").strip()
+    topic = str(payload.get("topic") or "").strip()
     password = str(payload.get("password") or "")
     auto_accept = bool(payload.get("auto_accept", True))
-
     if not topic:
-        topic = "FocusMate Meeting"
+        raise HTTPException(status_code=422, detail="Meeting topic is required")
     if len(topic) > 120:
         raise HTTPException(status_code=422, detail="Meeting topic must be 120 characters or fewer")
-    if password and len(password) < 4:
+    if len(password) < 4:
         raise HTTPException(status_code=422, detail="Meeting password must be at least 4 characters")
 
     room = db.query(models.Room).filter(models.Room.id == room_id).first()
@@ -163,12 +161,17 @@ def create_meeting(
         meeting_code = "FM-" + "".join(secrets.choice(alphabet) for _ in range(6))
 
     try:
+        # Keep compatibility with production databases that still enforce
+        # meetings.jitsi_room as NOT NULL. The current Agora flow does not use
+        # this value for its media channel; it is retained for legacy code.
+        legacy_jitsi_room = f"FocuseMate-{room_id}-{uuid4().hex[:8]}"
         meeting = models.Meeting(
             room_id=room_id,
             host_id=current_user.id,
+            jitsi_room=legacy_jitsi_room,
             meeting_code=meeting_code,
             topic=topic,
-            password_hash=get_password_hash(password) if password else None,
+            password_hash=get_password_hash(password),
             status="live",
             auto_accept=auto_accept,
         )
