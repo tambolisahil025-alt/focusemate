@@ -122,14 +122,18 @@ def create_meeting(
     if room_id is None:
         raise HTTPException(status_code=422, detail="A valid room_id is required")
 
-    topic = str(payload.get("topic") or "").strip()
+    # Topic/password remain supported for callers that provide them, but they
+    # are optional so the existing Room -> Create Meeting button continues to
+    # work without introducing a new form.
+    topic = str(payload.get("topic") or "FocusMate Meeting").strip()
     password = str(payload.get("password") or "")
     auto_accept = bool(payload.get("auto_accept", True))
+
     if not topic:
-        raise HTTPException(status_code=422, detail="Meeting topic is required")
+        topic = "FocusMate Meeting"
     if len(topic) > 120:
         raise HTTPException(status_code=422, detail="Meeting topic must be 120 characters or fewer")
-    if len(password) < 4:
+    if password and len(password) < 4:
         raise HTTPException(status_code=422, detail="Meeting password must be at least 4 characters")
 
     room = db.query(models.Room).filter(models.Room.id == room_id).first()
@@ -164,7 +168,7 @@ def create_meeting(
             host_id=current_user.id,
             meeting_code=meeting_code,
             topic=topic,
-            password_hash=get_password_hash(password),
+            password_hash=get_password_hash(password) if password else None,
             status="live",
             auto_accept=auto_accept,
         )
