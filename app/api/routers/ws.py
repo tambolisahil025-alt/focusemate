@@ -1,8 +1,5 @@
 import json
 import logging
-import time
-from datetime import datetime, timezone
-from uuid import uuid4
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, UploadFile, File, Request,Form
@@ -29,6 +26,11 @@ class ConnectionManager:
         self.active_connections: Dict[int, List[WebSocket]] = {}
         self.direct_connections: Dict[int, List[WebSocket]] = {}
         self.meeting_connections: Dict[int, List[WebSocket]] = {}
+        self.room_meeting_connections: Dict[int, List[WebSocket]] = {}
+        self.meeting_room_ids: Dict[int, int] = {}
+        # Read-only watchers for live room member counts. These sockets are
+        # intentionally kept separate so observing a count does not increment it.
+        self.room_presence_connections: Dict[int, List[WebSocket]] = {}
 
     async def connect(self, websocket: WebSocket, room_id: int):
         await websocket.accept()
@@ -52,16 +54,56 @@ class ConnectionManager:
                     stale.append(connection)
             for connection in stale:
                 self.disconnect(connection, room_id)
+            if stale:
+                await self.broadcast_room_member_count(room_id)
+
+    async def connect_room_presence(self, websocket: WebSocket, room_id: int):
+        await websocket.accept()
+        self.room_presence_connections.setdefault(room_id, []).append(websocket)
+
+    def disconnect_room_presence(self, websocket: WebSocket, room_id: int):
+        connections = self.room_presence_connections.get(room_id, [])
+        if websocket in connections:
+            connections.remove(websocket)
+        if not connections and room_id in self.room_presence_connections:
+            del self.room_presence_connections[room_id]
+
+    def get_room_member_count(self, room_id: int) -> int:
+        # Prefer live meeting connections when a room has a live meeting.
+        # Otherwise fall back to the room's live chat/presence WebSockets.
+        meeting_connections = self.room_meeting_connections.get(room_id, [])
+        if meeting_connections:
+            return len(meeting_connections)
+        return len(self.active_connections.get(room_id, []))
+
+    async def broadcast_room_member_count(self, room_id: int):
+        count = self.get_room_member_count(room_id)
+        payload = {
+            "type": "room-member-count",
+            "room_id": room_id,
+            "member_count": count,
+        }
+        stale = []
+        for connection in list(self.room_presence_connections.get(room_id, [])):
+            try:
+                await connection.send_json(payload)
+            except Exception:
+                stale.append(connection)
+        for connection in stale:
+            self.disconnect_room_presence(connection, room_id)
 
     async def connect_direct(self, websocket: WebSocket, user_id: int):
         await websocket.accept()
         self.direct_connections.setdefault(user_id, []).append(websocket)
 
-    async def connect_meeting(self, websocket: WebSocket, meeting_id: int):
+    async def connect_meeting(self, websocket: WebSocket, meeting_id: int, room_id: Optional[int] = None):
         await websocket.accept()
         if meeting_id not in self.meeting_connections:
             self.meeting_connections[meeting_id] = []
         self.meeting_connections[meeting_id].append(websocket)
+        if room_id is not None:
+            self.meeting_room_ids[meeting_id] = room_id
+            self.room_meeting_connections.setdefault(room_id, []).append(websocket)
 
     def disconnect_direct(self, websocket: WebSocket, user_id: int):
         if user_id in self.direct_connections and websocket in self.direct_connections[user_id]:
@@ -74,6 +116,17 @@ class ConnectionManager:
             self.meeting_connections[meeting_id].remove(websocket)
             if not self.meeting_connections[meeting_id]:
                 del self.meeting_connections[meeting_id]
+
+        room_id = self.meeting_room_ids.get(meeting_id)
+        if room_id is not None:
+            room_connections = self.room_meeting_connections.get(room_id, [])
+            if websocket in room_connections:
+                room_connections.remove(websocket)
+            if not room_connections:
+                self.room_meeting_connections.pop(room_id, None)
+                # The meeting may have ended, so no future connection should
+                # inherit the stale mapping.
+                self.meeting_room_ids.pop(meeting_id, None)
 
     async def broadcast_direct(self, user_ids: List[int], message: dict):
         for user_id in user_ids:
@@ -88,6 +141,7 @@ class ConnectionManager:
 
     async def broadcast_to_meeting(self, meeting_id: int, message: dict):
         if meeting_id in self.meeting_connections:
+            room_id = self.meeting_room_ids.get(meeting_id)
             stale = []
             for connection in list(self.meeting_connections[meeting_id]):
                 try:
@@ -96,6 +150,8 @@ class ConnectionManager:
                     stale.append(connection)
             for connection in stale:
                 self.disconnect_meeting(connection, meeting_id)
+            if stale and room_id is not None:
+                await self.broadcast_room_member_count(room_id)
 
     async def broadcast_all_direct(self, message: dict):
         stale = []
@@ -154,6 +210,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
         "user_id": user.id,
         "user_name": user.name
     })
+    await manager.broadcast_room_member_count(room_id)
 
     try:
         while True:
@@ -178,11 +235,9 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
                 db.commit()
                 db.refresh(new_msg)
                 
-                client_message_id = message_data.get("client_message_id")
                 broadcast_data = {
                     "type": "chat_message",
                     "data": {
-                        "client_message_id": client_message_id,
                         "id": new_msg.id,
                         "room_id": room_id,
                         "sender_id": user.id,
@@ -196,12 +251,6 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
                     }
                 }
                 db.close()
-                if client_message_id:
-                    await websocket.send_json({
-                        "type": "message-ack",
-                        "client_message_id": client_message_id,
-                        "message": broadcast_data["data"],
-                    })
                 await manager.broadcast_to_room(room_id, broadcast_data)
                 
             elif message_data.get("type") == "typing":
@@ -218,9 +267,11 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
             "user_id": user.id,
             "user_name": user.name
         })
+        await manager.broadcast_room_member_count(room_id)
     except Exception:
         logger.exception("Room chat WebSocket failed for room %s and user %s", room_id, user.id)
         manager.disconnect(websocket, room_id)
+        await manager.broadcast_room_member_count(room_id)
         try:
             await websocket.close(code=1011)
         except Exception:
@@ -247,7 +298,7 @@ async def websocket_meeting(websocket: WebSocket, meeting_id: int, token: str):
         await websocket.close(code=1008)
         return
 
-    await manager.connect_meeting(websocket, meeting_id)
+    await manager.connect_meeting(websocket, meeting_id, meeting.room_id)
 
     await manager.broadcast_to_meeting(meeting_id, {
         "type": "participant-joined",
@@ -255,6 +306,7 @@ async def websocket_meeting(websocket: WebSocket, meeting_id: int, token: str):
         "name": user.name,
         "avatar": user.avatar,
     })
+    await manager.broadcast_room_member_count(meeting.room_id)
 
     try:
         while True:
@@ -270,34 +322,12 @@ async def websocket_meeting(websocket: WebSocket, meeting_id: int, token: str):
                 else:
                     await manager.broadcast_to_meeting(meeting_id, message)
             elif event_type == "meeting-chat":
-                content = str(data.get("content") or "").strip()
-                if not content:
-                    await websocket.send_json({
-                        "type": "message-ack",
-                        "client_message_id": data.get("client_message_id"),
-                        "ok": False,
-                        "error": "Message content cannot be empty.",
-                    })
-                    continue
-                message_id = data.get("message_id") or f"meeting-{int(time.time() * 1000)}-{uuid4().hex[:8]}"
-                created_at = datetime.now(timezone.utc).isoformat()
-                payload = {
+                await manager.broadcast_to_meeting(meeting_id, {
                     "type": "meeting-chat",
-                    "message_id": message_id,
-                    "client_message_id": data.get("client_message_id"),
                     "user_id": user.id,
                     "name": user.name,
-                    "avatar": user.avatar,
-                    "content": content,
-                    "created_at": created_at,
-                }
-                if data.get("client_message_id"):
-                    await websocket.send_json({
-                        "type": "message-ack",
-                        "client_message_id": data.get("client_message_id"),
-                        "message": payload,
-                    })
-                await manager.broadcast_to_meeting(meeting_id, payload)
+                    "content": data.get("content")
+                })
 
     except WebSocketDisconnect:
         manager.disconnect_meeting(websocket, meeting_id)
@@ -306,6 +336,40 @@ async def websocket_meeting(websocket: WebSocket, meeting_id: int, token: str):
             "user_id": user.id,
             "user_name": user.name
         })
+        await manager.broadcast_room_member_count(meeting.room_id)
+
+@router.websocket("/ws/room-presence/{room_id}")
+async def room_presence_endpoint(websocket: WebSocket, room_id: int, token: str):
+    user = get_user_from_token(token)
+    if not user:
+        await websocket.close(code=1008)
+        return
+
+    db = SessionLocal()
+    try:
+        room = db.query(models.Room).filter(models.Room.id == room_id).first()
+    finally:
+        db.close()
+
+    if not room:
+        await websocket.close(code=1008)
+        return
+
+    await manager.connect_room_presence(websocket, room_id)
+    try:
+        await manager.broadcast_room_member_count(room_id)
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect_room_presence(websocket, room_id)
+    except Exception:
+        logger.exception("Room presence WebSocket failed for room %s and user %s", room_id, user.id)
+        manager.disconnect_room_presence(websocket, room_id)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
 
 @router.websocket("/ws/direct")
 async def direct_message_websocket(websocket: WebSocket, token: str):

@@ -1,7 +1,7 @@
 import json
 import logging
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request, Body
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import List, Optional
@@ -20,6 +20,13 @@ router = APIRouter(prefix="/rooms", tags=["rooms"])
 
 class JoinRequestAction(BaseModel):
     action: str
+
+
+class RoomResourceCreate(BaseModel):
+    title: str
+    description: Optional[str] = None
+    resource_type: str = "link"
+    link: Optional[str] = None
 
 def get_room_member(db: Session, room_id: int, user_id: int):
     return db.query(models.RoomMember).filter(
@@ -372,6 +379,45 @@ def get_room_resources(room_id: int, db: Session = Depends(get_db), current_user
     require_room_member(db, room_id, current_user.id)
     resources = db.query(models.Resource).filter(models.Resource.room_id == room_id).all()
     return resources
+
+@router.post("/{room_id}/resources/")
+def create_room_resource(
+    room_id: int,
+    payload: RoomResourceCreate = Body(...),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Create a resource from a URL/text reference without a file upload."""
+    room = db.query(models.Room).filter(models.Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    require_room_member(db, room_id, current_user.id)
+
+    title = (payload.title or "").strip()
+    link = (payload.link or "").strip() or None
+    resource_type = (payload.resource_type or "link").strip().lower()
+    allowed_types = {"image", "video", "pdf", "link", "note", "pyq"}
+
+    if not title:
+        raise HTTPException(status_code=422, detail="Resource title is required")
+    if resource_type not in allowed_types:
+        raise HTTPException(status_code=422, detail="Unsupported resource type")
+    if not link:
+        raise HTTPException(status_code=422, detail="A resource link is required")
+
+    resource = models.Resource(
+        room_id=room_id,
+        added_by_id=current_user.id,
+        title=title,
+        description=(payload.description or "").strip() or None,
+        resource_type=resource_type,
+        link=link,
+    )
+    db.add(resource)
+    db.commit()
+    db.refresh(resource)
+    return resource
+
 
 @router.post("/{room_id}/resources/upload")
 async def upload_room_resource(
