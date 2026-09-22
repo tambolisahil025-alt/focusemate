@@ -1,5 +1,8 @@
 import json
 import logging
+import time
+from datetime import datetime, timezone
+from uuid import uuid4
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, UploadFile, File, Request,Form
@@ -175,9 +178,11 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
                 db.commit()
                 db.refresh(new_msg)
                 
+                client_message_id = message_data.get("client_message_id")
                 broadcast_data = {
                     "type": "chat_message",
                     "data": {
+                        "client_message_id": client_message_id,
                         "id": new_msg.id,
                         "room_id": room_id,
                         "sender_id": user.id,
@@ -191,6 +196,12 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
                     }
                 }
                 db.close()
+                if client_message_id:
+                    await websocket.send_json({
+                        "type": "message-ack",
+                        "client_message_id": client_message_id,
+                        "message": broadcast_data["data"],
+                    })
                 await manager.broadcast_to_room(room_id, broadcast_data)
                 
             elif message_data.get("type") == "typing":
@@ -259,12 +270,34 @@ async def websocket_meeting(websocket: WebSocket, meeting_id: int, token: str):
                 else:
                     await manager.broadcast_to_meeting(meeting_id, message)
             elif event_type == "meeting-chat":
-                await manager.broadcast_to_meeting(meeting_id, {
+                content = str(data.get("content") or "").strip()
+                if not content:
+                    await websocket.send_json({
+                        "type": "message-ack",
+                        "client_message_id": data.get("client_message_id"),
+                        "ok": False,
+                        "error": "Message content cannot be empty.",
+                    })
+                    continue
+                message_id = data.get("message_id") or f"meeting-{int(time.time() * 1000)}-{uuid4().hex[:8]}"
+                created_at = datetime.now(timezone.utc).isoformat()
+                payload = {
                     "type": "meeting-chat",
+                    "message_id": message_id,
+                    "client_message_id": data.get("client_message_id"),
                     "user_id": user.id,
                     "name": user.name,
-                    "content": data.get("content")
-                })
+                    "avatar": user.avatar,
+                    "content": content,
+                    "created_at": created_at,
+                }
+                if data.get("client_message_id"):
+                    await websocket.send_json({
+                        "type": "message-ack",
+                        "client_message_id": data.get("client_message_id"),
+                        "message": payload,
+                    })
+                await manager.broadcast_to_meeting(meeting_id, payload)
 
     except WebSocketDisconnect:
         manager.disconnect_meeting(websocket, meeting_id)

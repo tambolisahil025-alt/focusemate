@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/messages", tags=["messages"])
 
 class MessageCreate(BaseModel):
+    client_message_id: Optional[str] = None
     room_id: int
     content: str
     message_type: str = "text"
@@ -32,6 +33,7 @@ def message_payload(message: models.Message, sender: Optional[models.User] = Non
         except (TypeError, ValueError):
             pass
     return {
+        "client_message_id": getattr(message, "_client_message_id", None),
         "id": message.id,
         "room_id": message.room_id,
         "sender_id": message.sender_id,
@@ -84,6 +86,7 @@ async def create_message(
     db.refresh(new_message)
     
     response = {
+        "client_message_id": payload.client_message_id,
         "id": new_message.id,
         "room_id": new_message.room_id,
         "sender_id": new_message.sender_id,
@@ -183,6 +186,7 @@ async def create_direct_message(
     db.refresh(new_message)
 
     response = {
+        "client_message_id": payload.client_message_id,
         "id": new_message.id,
         "sender_id": new_message.sender_id,
         "receiver_id": new_message.receiver_id,

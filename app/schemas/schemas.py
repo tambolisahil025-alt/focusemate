@@ -51,6 +51,7 @@ class RoomResponse(RoomBase):
     model_config = ConfigDict(from_attributes=True)
 
 class MessageResponse(BaseModel):
+    client_message_id: Optional[str] = None
     id: int
     room_id: int
     sender_id: Optional[int]
@@ -80,12 +81,14 @@ class MeetingJoinWithInvite(BaseModel):
 
 # --- NEW: DIRECT MESSAGES SCHEMAS ---
 class DirectMessageCreate(BaseModel):
+    client_message_id: Optional[str] = None
     receiver_id: int
     content: str
     message_type: str = "text"
     reply_to: Optional[int] = None
 
 class DirectMessageResponse(BaseModel):
+    client_message_id: Optional[str] = None
     id: int
     sender_id: int
     receiver_id: int
