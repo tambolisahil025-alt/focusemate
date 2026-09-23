@@ -11,7 +11,6 @@ from app.api.deps import get_db, get_current_user
 from app.db import models
 from app.core.config import settings
 from app.core.security import verify_password, get_password_hash
-from app.api.routers.ws import manager
 from agora_token_builder import RtcTokenBuilder
 
 logger = logging.getLogger(__name__)
@@ -46,9 +45,6 @@ ensure_meeting_schema = _ensure_meeting_schema
 
 
 def meeting_summary(meeting: models.Meeting, invite_url: str | None = None, invite_token: str | None = None):
-    share_url = None
-    if settings.FRONTEND_APP_URL:
-        share_url = f"{settings.FRONTEND_APP_URL.rstrip('/')}/meet?meetingId={meeting.id}"
     return {
         "meeting_id": meeting.id,
         "id": meeting.id,
@@ -63,7 +59,6 @@ def meeting_summary(meeting: models.Meeting, invite_url: str | None = None, invi
         "ended_at": meeting.ended_at,
         "invite_url": invite_url,
         "invite_token": invite_token,
-        "share_url": share_url,
     }
 
 
@@ -232,37 +227,6 @@ def get_meeting(meeting_id: int, db: Session = Depends(get_db), current_user: mo
         raise HTTPException(status_code=404, detail="Meeting not found")
     require_approved_participant(db, meeting_id, current_user.id)
     return meeting_summary(meeting)
-
-
-@router.get("/{meeting_id}/participants")
-def get_meeting_participants(meeting_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    _ensure_meeting_schema(db)
-    meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found")
-    require_approved_participant(db, meeting_id, current_user.id)
-
-    rows = db.query(models.MeetingParticipant, models.User).join(
-        models.User, models.User.id == models.MeetingParticipant.user_id
-    ).filter(
-        models.MeetingParticipant.meeting_id == meeting_id,
-        models.MeetingParticipant.status == "approved",
-        models.MeetingParticipant.banned == False,
-    ).order_by(models.MeetingParticipant.joined_at.asc(), models.MeetingParticipant.id.asc()).all()
-
-    participants = []
-    for participant, user in rows:
-        participants.append({
-            "user_id": user.id,
-            "name": user.name,
-            "username": getattr(user, "username", None),
-            "avatar": user.avatar,
-            "role": participant.role,
-            "status": participant.status,
-            "joined_at": participant.joined_at,
-        })
-
-    return {"participants": participants, "total": len(participants)}
 
 
 @router.post("/{meeting_id}/join")
@@ -542,7 +506,7 @@ def kick_participant(meeting_id: int, payload: dict = Body(...), db: Session = D
 
 
 @router.post("/{meeting_id}/end")
-async def end_meeting(meeting_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def end_meeting(meeting_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     _ensure_meeting_schema(db)
     meeting = db.query(models.Meeting).filter(models.Meeting.id == meeting_id).first()
     if not meeting:
@@ -560,10 +524,6 @@ async def end_meeting(meeting_id: int, db: Session = Depends(get_db), current_us
     ).update({models.MeetingInvitation.used: True})
     db.add(meeting)
     db.commit()
-    try:
-        await manager.broadcast_to_meeting(meeting_id, {"type": "meeting-ended", "meeting_id": meeting_id})
-    except Exception:
-        logger.exception("Unable to broadcast meeting-ended for meeting %s", meeting_id)
     return {"status": "ended"}
 
 
