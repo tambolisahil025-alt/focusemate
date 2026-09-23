@@ -3,7 +3,7 @@ AI Assistant API Routes for StudySpace
 Provides AI chat, suggestions, and context-aware help
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 from app.schemas import schemas
 from app.api.deps import get_db, get_optional_current_user
@@ -134,6 +134,69 @@ You help users:
         logger.exception(f"AI chat error: {str(e)}")
         raise _ai_error_response(e)
 
+
+
+@router.post("/transcribe-audio")
+async def transcribe_audio(
+    file: UploadFile = File(...),
+    language: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(get_optional_current_user),
+):
+    """Transcribe microphone audio for the existing AI meeting-notes feature."""
+    del db, current_user  # Authentication is optional here, matching the existing AI routes.
+
+    allowed_types = {
+        "audio/m4a",
+        "audio/mp4",
+        "audio/mpeg",
+        "audio/ogg",
+        "audio/wav",
+        "audio/webm",
+        "audio/flac",
+        "application/octet-stream",
+    }
+
+    content_type = (file.content_type or "").lower()
+    filename = file.filename or "focusmate-audio.m4a"
+    extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    allowed_extensions = {"m4a", "mp4", "mp3", "mpeg", "mpga", "ogg", "wav", "webm", "flac"}
+
+    if content_type not in allowed_types and extension not in allowed_extensions:
+        raise HTTPException(
+            status_code=415,
+            detail="Unsupported audio format. Use m4a, mp3, wav, ogg, webm, mp4, or flac.",
+        )
+
+    try:
+        audio_bytes = await file.read()
+        if not audio_bytes:
+            raise HTTPException(status_code=400, detail="The uploaded audio file is empty.")
+
+        # Keep one bounded upload path so an accidental huge recording cannot consume
+        # the API process. Groq's current Whisper limits allow files up to 100 MB on
+        # the model endpoint; larger recordings should be split into smaller notes.
+        max_bytes = 100 * 1024 * 1024
+        if len(audio_bytes) > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail="The audio recording is too large. Please record a shorter note.",
+            )
+
+        groq_service = await get_groq_service()
+        text = await groq_service.transcribe_audio(
+            audio_bytes=audio_bytes,
+            filename=filename,
+            content_type=content_type or None,
+            language=language,
+        )
+        return {"text": text}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("AI audio transcription error: %s", e)
+        raise _ai_error_response(e)
 
 @router.post("/suggestions", response_model=schemas.AISuggestionsResponse)
 async def get_ai_suggestions(

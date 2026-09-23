@@ -133,6 +133,78 @@ class GroqService:
         
         raise Exception("Invalid GROQ response format")
     
+
+    async def transcribe_audio(
+        self,
+        audio_bytes: bytes,
+        filename: str,
+        content_type: Optional[str] = None,
+        language: Optional[str] = None,
+    ) -> str:
+        """Transcribe uploaded audio through Groq's OpenAI-compatible Whisper API."""
+        if not audio_bytes:
+            raise ValueError("Audio recording is empty")
+
+        url = f"{self.BASE_URL}/audio/transcriptions"
+        files = {
+            "file": (
+                filename or "focusmate-audio.m4a",
+                audio_bytes,
+                content_type or "audio/m4a",
+            )
+        }
+        data = {
+            "model": "whisper-large-v3-turbo",
+            "response_format": "json",
+            "temperature": "0",
+        }
+        if language:
+            data["language"] = language
+
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.post(
+                    url,
+                    files=files,
+                    data=data,
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
+                response.raise_for_status()
+
+            payload = response.json()
+            text = str(payload.get("text") or "").strip()
+            if not text:
+                raise ValueError("Groq returned an empty transcription")
+            return text
+
+        except httpx.TimeoutException as e:
+            logger.error("GROQ transcription timeout: %s", e)
+            raise Exception("GROQ transcription timeout") from e
+        except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code
+            response_text = e.response.text or ""
+            logger.error(
+                "GROQ transcription error: %s - %s",
+                status_code,
+                response_text,
+            )
+            if status_code == 429:
+                raise Exception(
+                    "GROQ transcription rate limit reached. Please try again later."
+                ) from e
+            if status_code in {401, 403}:
+                raise Exception("GROQ transcription authorization failed") from e
+            if status_code == 413:
+                raise Exception(
+                    "The audio recording is too large for the transcription service."
+                ) from e
+            raise Exception(
+                f"GROQ transcription error: {status_code} - {response_text}"
+            ) from e
+        except httpx.RequestError as e:
+            logger.error("GROQ transcription network error: %s", e)
+            raise Exception(f"GROQ transcription network error: {e}") from e
+
     async def get_context_suggestions(
         self,
         screen_name: str,
