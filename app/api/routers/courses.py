@@ -1,9 +1,13 @@
+from datetime import datetime, timezone
+from urllib.parse import parse_qs, urlsplit
+
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
 from app.db import models
+from app.services.learning_activity_service import award_activity
 
 router = APIRouter(prefix="/courses", tags=["courses"])
 
@@ -12,6 +16,74 @@ class CourseCreate(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str | None = Field(default=None, max_length=2000)
     code: str = Field(min_length=1, max_length=40)
+
+
+class CourseResourceCreate(BaseModel):
+    topic: str = Field(min_length=1, max_length=200)
+    url: str = Field(min_length=8, max_length=2048)
+    title: str | None = Field(default=None, max_length=300)
+    description: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        parsed = urlsplit(value.strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("Enter a valid public HTTP or HTTPS resource URL")
+        return value.strip()
+
+
+def infer_resource_metadata(url: str, title: str | None = None) -> dict:
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    is_youtube = host in {"youtube.com", "m.youtube.com", "youtu.be", "youtube-nocookie.com"} or host.endswith(".youtube.com")
+    query = parse_qs(parsed.query)
+    video_id = query.get("v", [None])[0]
+    if host == "youtu.be":
+        video_id = parsed.path.strip("/").split("/")[0] or None
+    elif not video_id and "/shorts/" in parsed.path:
+        video_id = parsed.path.split("/shorts/", 1)[1].split("/", 1)[0]
+
+    if is_youtube and query.get("list"):
+        resource_type = "youtube_playlist"
+        default_title = "YouTube lecture playlist"
+    elif is_youtube and video_id:
+        resource_type = "youtube_video"
+        default_title = "YouTube lecture"
+    elif parsed.path.lower().endswith(".pdf") or any(term in parsed.path.lower() for term in ("notes", "lecture", "document")):
+        resource_type = "notes"
+        default_title = "Study notes"
+    elif any(term in parsed.path.lower() for term in ("article", "blog", "guide")):
+        resource_type = "article"
+        default_title = "Study article"
+    else:
+        resource_type = "study_link"
+        default_title = "Study link"
+
+    thumbnail_url = f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg" if resource_type == "youtube_video" and video_id else None
+    return {
+        "resource_type": resource_type,
+        "title": (title or "").strip() or default_title,
+        "source": host,
+        "thumbnail_url": thumbnail_url,
+    }
+
+
+def serialize_course_resource(resource: models.CourseResource) -> dict:
+    return {
+        "id": resource.id,
+        "course_id": resource.course_id,
+        "topic": resource.topic,
+        "title": resource.title,
+        "url": resource.url,
+        "link": resource.url,
+        "resource_type": resource.resource_type,
+        "thumbnail_url": resource.thumbnail_url,
+        "source": resource.source,
+        "description": resource.description,
+        "added_by_id": resource.added_by_id,
+        "created_at": resource.created_at,
+    }
 
 
 def serialize_course(db: Session, course: models.Course, current_user_id: int) -> dict:
@@ -123,3 +195,92 @@ def leave_course(course_id: int, db: Session = Depends(get_db), current_user: mo
     db.delete(membership)
     db.commit()
     return {"detail": "Successfully left course"}
+
+
+@router.get("/{course_id}/resources")
+def list_course_resources(
+    course_id: int,
+    topic: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    get_authorized_course(db, course_id, current_user.id)
+    query = db.query(models.CourseResource).filter(models.CourseResource.course_id == course_id)
+    if topic and topic.strip():
+        query = query.filter(models.CourseResource.topic.ilike(topic.strip()))
+    resources = query.order_by(models.CourseResource.created_at.desc()).all()
+    return [serialize_course_resource(resource) for resource in resources]
+
+
+@router.post("/{course_id}/resources")
+def add_course_resource(
+    course_id: int,
+    payload: CourseResourceCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    get_authorized_course(db, course_id, current_user.id)
+    metadata = infer_resource_metadata(payload.url, payload.title)
+    resource = models.CourseResource(
+        course_id=course_id,
+        added_by_id=current_user.id,
+        topic=payload.topic.strip(),
+        url=payload.url,
+        title=metadata["title"],
+        resource_type=metadata["resource_type"],
+        thumbnail_url=metadata["thumbnail_url"],
+        source=metadata["source"],
+        description=payload.description.strip() if payload.description else None,
+    )
+    db.add(resource)
+    db.commit()
+    db.refresh(resource)
+    return serialize_course_resource(resource)
+
+
+@router.delete("/{course_id}/resources/{resource_id}")
+def delete_course_resource(
+    course_id: int,
+    resource_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    get_authorized_course(db, course_id, current_user.id)
+    resource = db.query(models.CourseResource).filter(
+        models.CourseResource.id == resource_id,
+        models.CourseResource.course_id == course_id,
+    ).first()
+    if not resource:
+        raise HTTPException(status_code=404, detail="Course resource not found")
+    membership = db.query(models.CourseMember).filter(
+        models.CourseMember.course_id == course_id,
+        models.CourseMember.user_id == current_user.id,
+    ).first()
+    if resource.added_by_id != current_user.id and membership.role != "instructor":
+        raise HTTPException(status_code=403, detail="Only the person who added this resource or the instructor can remove it")
+    db.delete(resource)
+    db.commit()
+    return {"detail": "Resource removed"}
+
+
+@router.post("/{course_id}/resources/{resource_id}/studied")
+def mark_course_resource_studied(
+    course_id: int,
+    resource_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    get_authorized_course(db, course_id, current_user.id)
+    resource = db.query(models.CourseResource).filter(
+        models.CourseResource.id == resource_id,
+        models.CourseResource.course_id == course_id,
+    ).first()
+    if not resource:
+        raise HTTPException(status_code=404, detail="Course resource not found")
+    day_key = datetime.now(timezone.utc).date().isoformat()
+    activity, created = award_activity(
+        db, current_user, activity_type="resource_studied", topic=resource.topic,
+        event_key=f"resource:{current_user.id}:{resource.id}:{day_key}", xp=5,
+    )
+    db.commit()
+    return {"xp_earned": activity.xp_earned if created else 0, "detail": "Study activity recorded"}

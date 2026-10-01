@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text, ARRAY, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text, ARRAY, JSON, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.db.database import Base
@@ -169,7 +169,39 @@ class QuizAttempt(Base):
     score = Column(Integer, nullable=False)
     percentage = Column(Integer, nullable=False)
     xp_earned = Column(Integer, nullable=False)
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=True)
+    source = Column(String(32), nullable=False, default="topic")
+    resource_ids = Column(JSON, nullable=False, default=list)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class CourseResource(Base):
+    __tablename__ = "course_resources"
+
+    id = Column(Integer, primary_key=True, index=True)
+    course_id = Column(Integer, ForeignKey("courses.id", ondelete="CASCADE"), nullable=False, index=True)
+    added_by_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    topic = Column(String(200), nullable=False, index=True)
+    title = Column(String(300), nullable=False)
+    url = Column(Text, nullable=False)
+    resource_type = Column(String(32), nullable=False, default="study_link")
+    thumbnail_url = Column(Text, nullable=True)
+    source = Column(String(200), nullable=True)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class LearningActivity(Base):
+    __tablename__ = "learning_activities"
+    __table_args__ = (UniqueConstraint("event_key", name="uq_learning_activity_event_key"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    activity_type = Column(String(40), nullable=False, index=True)
+    topic = Column(String(200), nullable=True, index=True)
+    xp_earned = Column(Integer, nullable=False, default=0)
+    event_key = Column(String(200), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 # --- NEW: DIRECT MESSAGES MODEL ---
 class DirectMessage(Base):

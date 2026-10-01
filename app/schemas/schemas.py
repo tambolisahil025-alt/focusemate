@@ -143,6 +143,9 @@ class QuizGenerateRequest(BaseModel):
     subject: Optional[str] = None
     difficulty: str = "medium"
     question_count: int = 10
+    course_id: Optional[int] = None
+    resource_ids: List[int] = Field(default_factory=list)
+    source: str = "topic"
 
 class QuizQuestion(BaseModel):
     question: str
@@ -157,6 +160,9 @@ class QuizGenerateResponse(BaseModel):
     subject: Optional[str] = None
     difficulty: str
     questions: List[QuizQuestion]
+    course_id: Optional[int] = None
+    resource_ids: List[int] = Field(default_factory=list)
+    source: str = "topic"
 
 class QuizCompleteRequest(BaseModel):
     topic: str
@@ -164,6 +170,9 @@ class QuizCompleteRequest(BaseModel):
     difficulty: str
     question_count: int
     correct_answers: int
+    course_id: Optional[int] = None
+    resource_ids: List[int] = Field(default_factory=list)
+    source: str = "topic"
 
 class QuizAttemptResponse(BaseModel):
     id: int
@@ -175,6 +184,9 @@ class QuizAttemptResponse(BaseModel):
     score: int
     percentage: int
     xp_earned: int
+    course_id: Optional[int] = None
+    source: str = "topic"
+    resource_ids: List[int] = Field(default_factory=list)
     created_at: datetime
     user_xp: Optional[int] = None
     user_level: Optional[int] = None
@@ -186,3 +198,30 @@ class GamificationResponse(BaseModel):
     current_level_xp: int
     xp_to_next_level: int
     badges: List[Dict[str, str]]
+    daily_xp: int = 0
+    daily_xp_target: int = 30
+    current_streak: int = 0
+    best_streak: int = 0
+    topic_progress: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class BrainstormTurnRequest(BaseModel):
+    topic: str = Field(min_length=1, max_length=200)
+    phase: str = "start"
+    prompt: Optional[str] = Field(default=None, max_length=1000)
+    answer: Optional[str] = Field(default=None, max_length=2000)
+    history: List[Dict[str, str]] = Field(default_factory=list)
+    course_id: Optional[int] = None
+    resource_ids: List[int] = Field(default_factory=list)
+
+
+class BrainstormTurnResponse(BaseModel):
+    activity_type: str
+    feedback: Optional[str] = None
+    next_prompt: Optional[str] = None
+    completed: bool = False
+
+
+class BrainstormCompleteRequest(BaseModel):
+    session_id: str = Field(min_length=8, max_length=100)
+    topic: str = Field(min_length=1, max_length=200)

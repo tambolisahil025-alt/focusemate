@@ -294,14 +294,37 @@ class GroqService:
             temperature=0.5
         )
 
-    async def generate_quiz(self, topic: str, subject: Optional[str], difficulty: str, question_count: int) -> List[Dict[str, Any]]:
+    async def generate_quiz(
+        self,
+        topic: str,
+        subject: Optional[str],
+        difficulty: str,
+        question_count: int,
+        resource_context: Optional[List[Dict[str, str]]] = None,
+        performance_context: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """Generate structured quiz JSON through the existing AI integration."""
         label = f"{subject} - {topic}" if subject else topic
+        resource_lines = [
+            f"- {item.get('title', 'Study resource')} ({item.get('resource_type', 'study_link')})"
+            for item in (resource_context or [])
+            if item.get("title")
+        ]
+        resource_instructions = ""
+        if resource_lines:
+            resource_instructions = (
+                "\nUse these selected preparation-resource titles as additional context, while "
+                "keeping every question grounded in established knowledge. The resource contents "
+                "were not fetched, so do not claim to quote or summarize them:\n"
+                + "\n".join(resource_lines[:20])
+            )
+        if performance_context:
+            resource_instructions += "\n" + performance_context
         system_prompt = f"""You generate educational multiple-choice quizzes. Return ONLY a JSON array with exactly {question_count} objects.
 Each object must contain: question (string), options (array of exactly 4 strings), correct_answer (one option string copied exactly from options), explanation (string), difficulty (exactly {difficulty}), and topic (exactly {topic}).
 """
         response = await self.chat(
-            messages=[{"role": "user", "content": f"Create a {difficulty} quiz about {label}. Avoid duplicate questions and keep every question relevant."}],
+            messages=[{"role": "user", "content": f"Create a {difficulty} quiz about {label}. Avoid duplicate questions and keep every question relevant.{resource_instructions}"}],
             system_prompt=system_prompt,
             max_tokens=min(7000, max(1200, question_count * 500)),
             temperature=0.4,
