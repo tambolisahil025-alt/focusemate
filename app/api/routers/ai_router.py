@@ -16,6 +16,35 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ai", tags=["ai-assistant"])
 
+# Temporary fallback so prompt personalization can be exercised for guest requests.
+MOCK_USER_DATA = {
+    "userName": "Alex",
+    "pastActivity": "Recently studied algebra and joined a focus room.",
+}
+
+
+def build_voice_assistant_prompt(user_data: dict) -> str:
+    """Build the personalized voice-assistant instructions for an LLM request."""
+    user_name = str(user_data.get("userName") or "there").strip()
+    past_activity = str(user_data.get("pastActivity") or "No recent activity is available.").strip()
+
+    return f"""You are EVA, a personalized voice assistant for FocusMate, a collaborative study platform.
+Help the user with studying, collaboration, app features, and the current task.
+The user's name is {user_name}.
+Their recent activity is: {past_activity}
+
+Voice response rules:
+- Speak naturally, warmly, and conversationally. Use contractions.
+- Keep every response under two short sentences.
+- Never use Markdown, bullets, asterisks, emojis, or other decorative formatting.
+- End every response with exactly one clear, relevant question.
+- Use the user's name and activity only when relevant; do not invent personal details."""
+
+
+if __name__ == "__main__":
+    # Run this module directly to preview the prompt with the temporary mock profile.
+    print(build_voice_assistant_prompt(MOCK_USER_DATA))
+
 
 def _ai_error_response(error: Exception) -> HTTPException:
     message = str(error)
@@ -67,36 +96,24 @@ async def ai_chat(
             "content": request.message
         })
         
-        # Build system context
-        user_context = (
-            f"User: {current_user.name} (Level {current_user.level})"
-            if current_user
-            else "User: Guest"
-        )
-
-        system_prompt = f"""You are StudySpace AI Assistant, a helpful guide for a collaborative study platform.
-You help users:
-- Navigate the app
-- Understand features
-- Complete tasks
-- Answer questions about studying and collaboration
-
-{user_context}"""
-        
-        if request.screen_name:
-            system_prompt += f"\nCurrent Screen: {request.screen_name}"
-        if request.user_action:
-            system_prompt += f"\nUser Action: {request.user_action}"
-        if request.app_context:
-            system_prompt += f"\nApp Context: {request.app_context}"
-        
-        system_prompt += "\n\nBe concise, friendly, and helpful. Keep responses under 200 words."
+        # Use authenticated identity and current request context where available.
+        user_data = {
+            "userName": current_user.name if current_user else MOCK_USER_DATA["userName"],
+            "pastActivity": (
+                f"Screen: {request.screen_name or 'unknown'}; "
+                f"recent action: {request.user_action or 'none'}; "
+                f"app context: {request.app_context or 'none'}"
+                if current_user and (request.screen_name or request.user_action or request.app_context)
+                else MOCK_USER_DATA["pastActivity"]
+            ),
+        }
+        system_prompt = build_voice_assistant_prompt(user_data)
         
         # Get AI response
         ai_response = await groq_service.chat(
             messages=messages,
             system_prompt=system_prompt,
-            max_tokens=500,
+            max_tokens=120,
             temperature=0.7
         )
         

@@ -9,7 +9,6 @@ from app.core.config import settings
 from jose import JWTError, jwt
 from pydantic import BaseModel
 from typing import Optional
-import httpx
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.post("/register", response_model=schemas.UserResponse)
@@ -64,54 +63,6 @@ class SocialAuthPayload(BaseModel):
     access_token: str
     id_token: Optional[str] = None
     profile: dict
-
-@router.post("/google", response_model=schemas.Token)
-async def google_auth(payload: SocialAuthPayload, db: Session = Depends(get_db)):
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(
-                "https://www.googleapis.com/userinfo/v2/me",
-                headers={"Authorization": f"Bearer {payload.access_token}"},
-            )
-            response.raise_for_status()
-            profile = response.json()
-    except httpx.HTTPStatusError:
-        raise HTTPException(status_code=401, detail="Invalid Google access token")
-    except httpx.RequestError:
-        profile = payload.profile or {}
-
-    email = profile.get("email")
-    name = profile.get("name")
-    avatar = profile.get("picture")
-
-    if not email:
-        raise HTTPException(status_code=400, detail="Google account must have an email")
-
-    # 1. Check if user exists
-    user = db.query(models.User).filter(models.User.email == email).first()
-
-    if not user:
-        # 2. Create user if they don't exist
-        user = models.User(
-            email=email,
-            name=name,
-            avatar=avatar,
-            provider="google"
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-
-    # 3. Generate FocuseMate tokens for the session
-    access_token = create_access_token(data={"sub": str(user.id)})
-    refresh_token = create_refresh_token(data={"sub": str(user.id)})
-
-    return {
-        "access_token": access_token, 
-        "refresh_token": refresh_token, 
-        "token_type": "bearer", 
-        "user_data": user
-    }
 
 @router.post("/facebook", response_model=schemas.Token)
 def facebook_auth(payload: SocialAuthPayload, db: Session = Depends(get_db)):
