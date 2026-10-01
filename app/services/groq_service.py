@@ -122,16 +122,24 @@ class GroqService:
             "model": self.model,
             "messages": formatted_messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_completion_tokens": max_tokens,
         }
+        if self.model.startswith("openai/gpt-oss-"):
+            # Reserve enough output budget for GPT-OSS to finish its reasoning
+            # and produce user-visible text.
+            payload["reasoning_effort"] = "low"
         
         response = await self._make_request("/chat/completions", data=payload)
         
         # Extract response text
-        if "choices" in response and len(response["choices"]) > 0:
-            return response["choices"][0]["message"]["content"]
+        choices = response.get("choices") or []
+        if choices:
+            message = choices[0].get("message") or {}
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
         
-        raise Exception("Invalid GROQ response format")
+        raise ValueError("GROQ returned an empty or invalid chat response")
     
 
     async def transcribe_audio(
