@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, get_db
 from app.db import models
 from app.services.learning_activity_service import award_activity
-from app.services.storage_service import upload_upload_file
+from app.services.storage_service import delete_storage_url, upload_upload_file
 
 router = APIRouter(prefix="/courses", tags=["courses"])
 
@@ -303,6 +303,37 @@ def leave_course(course_id: int, db: Session = Depends(get_db), current_user: mo
     db.delete(membership)
     db.commit()
     return {"detail": "Successfully left course"}
+
+
+@router.delete("/{course_id}")
+async def delete_course(course_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    course = db.query(models.Course).filter(models.Course.id == course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    if course.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the course instructor can delete this course")
+
+    resources = db.query(models.CourseResource).filter(
+        models.CourseResource.course_id == course_id
+    ).all()
+    try:
+        for resource in resources:
+            await delete_storage_url(resource.url)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Unable to remove course resources from cloud storage") from exc
+
+    db.query(models.QuizAttempt).filter(
+        models.QuizAttempt.course_id == course_id
+    ).update(
+        {
+            models.QuizAttempt.course_id: None,
+            models.QuizAttempt.resource_ids: [],
+        },
+        synchronize_session=False,
+    )
+    db.delete(course)
+    db.commit()
+    return {"detail": "Course deleted"}
 
 
 @router.get("/{course_id}/resources")
