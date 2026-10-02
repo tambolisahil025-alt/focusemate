@@ -1,13 +1,14 @@
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
 from app.db import models
 from app.services.learning_activity_service import award_activity
+from app.services.storage_service import upload_upload_file
 
 router = APIRouter(prefix="/courses", tags=["courses"])
 
@@ -231,6 +232,45 @@ def add_course_resource(
         thumbnail_url=metadata["thumbnail_url"],
         source=metadata["source"],
         description=payload.description.strip() if payload.description else None,
+    )
+    db.add(resource)
+    db.commit()
+    db.refresh(resource)
+    return serialize_course_resource(resource)
+
+
+@router.post("/{course_id}/resources/upload")
+async def upload_course_resource(
+    course_id: int,
+    topic: str = Form(...),
+    description: str | None = Form(None),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    get_authorized_course(db, course_id, current_user.id)
+    if not topic.strip():
+        raise HTTPException(status_code=400, detail="A resource topic is required")
+    if file.size is not None and file.size > 50 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Course resource files must be 50 MB or smaller")
+
+    try:
+        resource_url = await upload_upload_file(file, f"courses/{course_id}/resources")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Unable to store course resource in cloud storage") from exc
+
+    filename = file.filename or "Course resource"
+    content_type = (file.content_type or "").lower()
+    resource = models.CourseResource(
+        course_id=course_id,
+        added_by_id=current_user.id,
+        topic=topic.strip(),
+        title=filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1],
+        url=resource_url,
+        resource_type="study_link" if content_type.startswith(("image/", "video/")) else "notes",
+        thumbnail_url=None,
+        source="Uploaded file",
+        description=description.strip() if description else None,
     )
     db.add(resource)
     db.commit()
