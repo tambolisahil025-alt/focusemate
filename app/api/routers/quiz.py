@@ -264,10 +264,10 @@ async def brainstorm_turn(
         )
     if performance:
         context += " " + performance
-    system_prompt = """You run a short study brainstorm. Output only a JSON object with keys activity_type, feedback, next_prompt, completed.
+    system_prompt = f"""You run a {payload.total_rounds}-round study question game. Output only a JSON object with keys activity_type, feedback, next_prompt, recommendation, completed.
 activity_type must be one of rapid_fire, true_false, recall, quick_mcq, scenario.
 Start phase: feedback is null, next_prompt is one short challenge, completed is false.
-Answer phase: give brief accurate feedback on the student's answer, then offer one different short next_prompt unless completed is true. Never invent course-resource contents. Keep the wording clear and encouraging. Do not include markdown."""
+Answer phase: give brief accurate feedback on the student's answer. Before the final round, offer one different short next_prompt and set recommendation to null. On the final round, set completed to true, set next_prompt to null, and give one specific, encouraging study recommendation that would help the learner improve their understanding of {topic}. Never invent course-resource contents. Keep wording clear and do not include markdown."""
     history = [
         {"role": item.get("role"), "content": str(item.get("content") or "")[:800]}
         for item in payload.history[-6:]
@@ -281,8 +281,10 @@ Answer phase: give brief accurate feedback on the student's answer, then offer o
     else:
         if not payload.prompt or not payload.answer:
             raise HTTPException(status_code=400, detail="Include the prompt and your answer")
-        completed_by_count = sum(1 for item in history if item["role"] == "user") + 1 >= 3
-        history.append({"role": "user", "content": f"The challenge was: {payload.prompt[:800]}\nThe student's answer is: {payload.answer[:1600]}\nTopic: {topic}.{context}\nThere have been {sum(1 for item in history if item['role'] == 'user') + 1} answers. Set completed=true after the third answer."})
+        if payload.round_number > payload.total_rounds:
+            raise HTTPException(status_code=400, detail="Round number cannot exceed the total rounds")
+        completed_by_count = payload.round_number >= payload.total_rounds
+        history.append({"role": "user", "content": f"The challenge was: {payload.prompt[:800]}\nThe student's answer is: {payload.answer[:1600]}\nTopic: {topic}.{context}\nThis is answer {payload.round_number} of {payload.total_rounds}. Set completed=true only on the final answer."})
     try:
         ai_text = await (await get_groq_service()).chat(
             history, system_prompt=system_prompt, max_tokens=700, temperature=0.5,
@@ -296,18 +298,23 @@ Answer phase: give brief accurate feedback on the student's answer, then offer o
         activity_type = "recall"
     feedback = str(parsed.get("feedback") or "").strip() or None
     next_prompt = str(parsed.get("next_prompt") or "").strip() or None
-    completed = bool(parsed.get("completed")) or completed_by_count
+    recommendation = str(parsed.get("recommendation") or "").strip() or None
+    completed = payload.phase == "answer" and completed_by_count
     if payload.phase == "start" and not next_prompt:
         raise HTTPException(status_code=502, detail="Quick Brainstorm returned no challenge. Please retry.")
     if payload.phase == "answer" and not feedback:
         raise HTTPException(status_code=502, detail="Quick Brainstorm returned no feedback. Please retry.")
     if completed:
         next_prompt = None
-    elif payload.phase == "answer" and not next_prompt:
-        raise HTTPException(status_code=502, detail="Quick Brainstorm returned no next challenge. Please retry.")
+        if not recommendation:
+            recommendation = f"Review one example of {topic} and explain the key idea in your own words."
+    else:
+        recommendation = None
+        if payload.phase == "answer" and not next_prompt:
+            raise HTTPException(status_code=502, detail="Quick Brainstorm returned no next challenge. Please retry.")
     return schemas.BrainstormTurnResponse(
         activity_type=activity_type, feedback=feedback,
-        next_prompt=next_prompt, completed=completed,
+        next_prompt=next_prompt, recommendation=recommendation, completed=completed,
     )
 
 

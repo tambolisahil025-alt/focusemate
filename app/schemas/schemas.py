@@ -208,6 +208,8 @@ class GamificationResponse(BaseModel):
 class BrainstormTurnRequest(BaseModel):
     topic: str = Field(min_length=1, max_length=200)
     phase: str = "start"
+    round_number: int = Field(default=1, ge=1, le=20)
+    total_rounds: int = Field(default=10, ge=1, le=20)
     prompt: Optional[str] = Field(default=None, max_length=1000)
     answer: Optional[str] = Field(default=None, max_length=2000)
     history: List[Dict[str, str]] = Field(default_factory=list)
@@ -219,6 +221,7 @@ class BrainstormTurnResponse(BaseModel):
     activity_type: str
     feedback: Optional[str] = None
     next_prompt: Optional[str] = None
+    recommendation: Optional[str] = None
     completed: bool = False
 
 
