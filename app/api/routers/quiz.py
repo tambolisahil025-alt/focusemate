@@ -1,10 +1,12 @@
 import math
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import Session
 
@@ -15,6 +17,7 @@ from app.services.groq_service import get_groq_service
 from app.services.learning_activity_service import award_activity, get_learning_stats
 
 router = APIRouter(prefix="/quiz", tags=["quiz"])
+logger = logging.getLogger(__name__)
 
 
 def _validate_questions(items: list, topic: str, difficulty: str) -> List[schemas.QuizQuestion]:
@@ -78,8 +81,11 @@ async def generate_quiz(
         ).all()
         if len(resources) != len(resource_ids):
             raise HTTPException(status_code=404, detail="One or more selected resources were not found for this topic")
-        # Only titles and types are sent to the AI. Resource URLs and descriptions are not.
-        resource_context = [{"title": item.title, "resource_type": item.resource_type} for item in resources]
+        resource_context = [{
+            "title": item.title,
+            "resource_type": item.resource_type,
+            "description": (item.description or "").strip()[:1000],
+        } for item in resources]
 
     prior_attempts = db.query(models.QuizAttempt).filter(
         models.QuizAttempt.user_id == current_user.id,
@@ -216,7 +222,11 @@ def _authorized_resource_context(db: Session, user_id: int, course_id: int | Non
     ).all()
     if len(resources) != len(ids):
         raise HTTPException(status_code=404, detail="One or more selected resources were not found for this topic")
-    return [{"title": item.title, "resource_type": item.resource_type} for item in resources]
+    return [{
+        "title": item.title,
+        "resource_type": item.resource_type,
+        "description": (item.description or "").strip()[:1000],
+    } for item in resources]
 
 
 @router.post("/brainstorm/turn", response_model=schemas.BrainstormTurnResponse)
@@ -229,10 +239,15 @@ async def brainstorm_turn(
     if payload.phase not in {"start", "answer"}:
         raise HTTPException(status_code=400, detail="Invalid brainstorm phase")
     resource_context = _authorized_resource_context(db, current_user.id, payload.course_id, payload.resource_ids, topic)
-    attempts = db.query(models.QuizAttempt).filter(
-        models.QuizAttempt.user_id == current_user.id,
-        models.QuizAttempt.topic.ilike(topic),
-    ).order_by(models.QuizAttempt.created_at.desc()).limit(5).all()
+    try:
+        attempts = db.query(models.QuizAttempt).filter(
+            models.QuizAttempt.user_id == current_user.id,
+            models.QuizAttempt.topic.ilike(topic),
+        ).order_by(models.QuizAttempt.created_at.desc()).limit(5).all()
+    except SQLAlchemyError:
+        db.rollback()
+        logger.warning("Could not load quiz history for brainstorm; continuing without it", exc_info=True)
+        attempts = []
     performance = None
     if attempts:
         average = round(sum(item.percentage for item in attempts) / len(attempts))
@@ -240,8 +255,9 @@ async def brainstorm_turn(
 
     context = ""
     if resource_context:
-        context += " Selected course resource titles/types (their contents were not fetched): " + "; ".join(
-            f"{item['title']} ({item['resource_type']})" for item in resource_context[:20]
+        context += " Selected course resource titles, types, and user-provided descriptions (external contents were not fetched): " + "; ".join(
+            f"{item['title']} ({item['resource_type']})" + (f": {item['description']}" if item["description"] else "")
+            for item in resource_context[:20]
         )
     if performance:
         context += " " + performance
