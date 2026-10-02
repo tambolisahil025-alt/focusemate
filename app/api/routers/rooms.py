@@ -381,7 +381,12 @@ def get_room_members(room_id: int, db: Session = Depends(get_db), current_user: 
 
 @router.get("/{room_id}/resources/")
 def get_room_resources(room_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    require_room_member(db, room_id, current_user.id)
+    room = db.query(models.Room).filter(models.Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    membership = get_room_member(db, room_id, current_user.id)
+    if room.owner_id != current_user.id and not membership:
+        raise HTTPException(status_code=403, detail="You are not a member of this room")
     resources = db.query(models.Resource).filter(models.Resource.room_id == room_id).all()
     return resources
 
