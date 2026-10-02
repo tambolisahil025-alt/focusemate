@@ -7,8 +7,7 @@ from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.api.deps import get_current_user, get_db
 from app.db import models
@@ -90,6 +89,8 @@ async def generate_quiz(
     prior_attempts = db.query(models.QuizAttempt).filter(
         models.QuizAttempt.user_id == current_user.id,
         models.QuizAttempt.topic.ilike(topic),
+    ).options(
+        load_only(models.QuizAttempt.id, models.QuizAttempt.percentage, models.QuizAttempt.created_at)
     ).order_by(models.QuizAttempt.created_at.desc()).limit(5).all()
     performance_context = None
     if prior_attempts:
@@ -243,6 +244,8 @@ async def brainstorm_turn(
         attempts = db.query(models.QuizAttempt).filter(
             models.QuizAttempt.user_id == current_user.id,
             models.QuizAttempt.topic.ilike(topic),
+        ).options(
+            load_only(models.QuizAttempt.id, models.QuizAttempt.percentage, models.QuizAttempt.created_at)
         ).order_by(models.QuizAttempt.created_at.desc()).limit(5).all()
     except SQLAlchemyError:
         db.rollback()

@@ -337,6 +337,7 @@ async def websocket_meeting(websocket: WebSocket, meeting_id: int, token: str):
                         "user_id": user.id,
                         "name": user.name,
                         "content": content[:5000],
+                        "source": "voice",
                         "created_at": data.get("created_at"),
                     })
 
