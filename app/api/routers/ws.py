@@ -328,6 +328,17 @@ async def websocket_meeting(websocket: WebSocket, meeting_id: int, token: str):
                     "name": user.name,
                     "content": data.get("content")
                 })
+            elif event_type == "meeting-transcript":
+                content = str(data.get("content") or "").strip()
+                if content:
+                    await manager.broadcast_to_meeting(meeting_id, {
+                        "type": "meeting-transcript",
+                        "id": str(data.get("id") or ""),
+                        "user_id": user.id,
+                        "name": user.name,
+                        "content": content[:5000],
+                        "created_at": data.get("created_at"),
+                    })
 
     except WebSocketDisconnect:
         manager.disconnect_meeting(websocket, meeting_id)

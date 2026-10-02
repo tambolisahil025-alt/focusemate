@@ -41,7 +41,8 @@ def get_learning_stats(db: Session, user: models.User) -> dict:
     today = datetime.now(timezone.utc).date()
     activity_dates = [
         row[0] for row in db.query(func.date(models.LearningActivity.created_at)).filter(
-            models.LearningActivity.user_id == user.id
+            models.LearningActivity.user_id == user.id,
+            models.LearningActivity.activity_type != "brainstorm_complete",
         ).distinct().all() if row[0] is not None
     ]
     activity_dates.extend(
@@ -75,16 +76,12 @@ def get_learning_stats(db: Session, user: models.User) -> dict:
     start_of_today = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
     daily_xp = db.query(func.coalesce(func.sum(models.LearningActivity.xp_earned), 0)).filter(
         models.LearningActivity.user_id == user.id,
+        models.LearningActivity.activity_type != "brainstorm_complete",
         models.LearningActivity.created_at >= start_of_today,
     ).scalar() or 0
 
     attempts = db.query(models.QuizAttempt).filter(models.QuizAttempt.user_id == user.id).all()
     resources_added = db.query(models.CourseResource).filter(models.CourseResource.added_by_id == user.id).count()
-    brainstorms = db.query(models.LearningActivity).filter(
-        models.LearningActivity.user_id == user.id,
-        models.LearningActivity.activity_type == "brainstorm_complete",
-    ).count()
-
     badges = []
     if attempts:
         badges.append({"id": "first_quiz", "name": "First Quiz"})
@@ -96,25 +93,22 @@ def get_learning_stats(db: Session, user: models.User) -> dict:
         badges.append({"id": "quiz_master", "name": "Quiz Master"})
     if resources_added >= 1:
         badges.append({"id": "resource_collector", "name": "Resource Collector"})
-    if brainstorms >= 1:
-        badges.append({"id": "brainstorm_starter", "name": "Brainstorm Starter"})
     if current_streak >= 7:
         badges.append({"id": "seven_day_streak", "name": "7-Day Learning Streak"})
 
     topic_rows = {}
     for attempt in attempts:
-        entry = topic_rows.setdefault(attempt.topic, {"topic": attempt.topic, "quizzes": 0, "best_score": 0, "resources_studied": 0, "brainstorms": 0})
+        entry = topic_rows.setdefault(attempt.topic, {"topic": attempt.topic, "quizzes": 0, "best_score": 0, "resources_studied": 0})
         entry["quizzes"] += 1
         entry["best_score"] = max(entry["best_score"], attempt.percentage)
     for activity in db.query(models.LearningActivity).filter(
         models.LearningActivity.user_id == user.id,
         models.LearningActivity.topic.isnot(None),
+        models.LearningActivity.activity_type != "brainstorm_complete",
     ).all():
-        entry = topic_rows.setdefault(activity.topic, {"topic": activity.topic, "quizzes": 0, "best_score": 0, "resources_studied": 0, "brainstorms": 0})
+        entry = topic_rows.setdefault(activity.topic, {"topic": activity.topic, "quizzes": 0, "best_score": 0, "resources_studied": 0})
         if activity.activity_type == "resource_studied":
             entry["resources_studied"] += 1
-        elif activity.activity_type == "brainstorm_complete":
-            entry["brainstorms"] += 1
 
     xp = user.xp or 0
     return {

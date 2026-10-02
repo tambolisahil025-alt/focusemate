@@ -76,6 +76,19 @@ class CourseMember(Base):
     course = relationship("Course", back_populates="members")
     user = relationship("User")
 
+class CourseJoinRequest(Base):
+    __tablename__ = "course_join_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    course_id = Column(Integer, ForeignKey("courses.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(16), nullable=False, default="pending")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+
+    course = relationship("Course")
+    user = relationship("User")
+
 class Message(Base):
     __tablename__ = "messages"
 

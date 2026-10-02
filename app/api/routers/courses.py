@@ -107,6 +107,16 @@ def serialize_course(db: Session, course: models.Course, current_user_id: int) -
         ],
         "is_member": any(member.user_id == current_user_id for member in members),
         "role": next((member.role for member in members if member.user_id == current_user_id), None),
+        "pending_join_request_count": (
+            db.query(models.CourseJoinRequest)
+            .filter(
+                models.CourseJoinRequest.course_id == course.id,
+                models.CourseJoinRequest.status == "pending",
+            )
+            .count()
+            if course.owner_id == current_user_id
+            else 0
+        ),
         "created_at": course.created_at,
     }
 
@@ -159,7 +169,37 @@ def join_course_by_code(payload: dict, db: Session = Depends(get_db), current_us
     course = db.query(models.Course).filter(models.Course.code == code).first()
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
-    return join_course(course.id, db, current_user)
+    return request_course_join(course, db, current_user)
+
+
+def request_course_join(course: models.Course, db: Session, current_user: models.User) -> dict:
+    membership = db.query(models.CourseMember).filter(
+        models.CourseMember.course_id == course.id,
+        models.CourseMember.user_id == current_user.id,
+    ).first()
+    if membership:
+        return {"status": "joined", "course_id": course.id, "course_name": course.name}
+
+    existing = db.query(models.CourseJoinRequest).filter(
+        models.CourseJoinRequest.course_id == course.id,
+        models.CourseJoinRequest.user_id == current_user.id,
+        models.CourseJoinRequest.status == "pending",
+    ).first()
+    if existing:
+        return {"status": "pending", "course_id": course.id, "course_name": course.name}
+
+    request = models.CourseJoinRequest(course_id=course.id, user_id=current_user.id)
+    db.add(request)
+    db.add(models.Notification(
+        user_id=course.owner_id,
+        notification_type="course_join_request",
+        title="Course join request",
+        body=f"{current_user.name} requested to join '{course.name}'.",
+        actor_id=current_user.id,
+        actor_name=current_user.name,
+    ))
+    db.commit()
+    return {"status": "pending", "course_id": course.id, "course_name": course.name}
 
 
 @router.get("/{course_id}")
@@ -173,15 +213,82 @@ def join_course(course_id: int, db: Session = Depends(get_db), current_user: mod
     course = db.query(models.Course).filter(models.Course.id == course_id).first()
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
-    existing = db.query(models.CourseMember).filter(
-        models.CourseMember.course_id == course_id,
-        models.CourseMember.user_id == current_user.id,
+    return request_course_join(course, db, current_user)
+
+
+@router.get("/{course_id}/join-requests")
+def list_course_join_requests(course_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    course = db.query(models.Course).filter(models.Course.id == course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    if course.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the course instructor can review join requests")
+
+    requests = db.query(models.CourseJoinRequest).filter(
+        models.CourseJoinRequest.course_id == course_id,
+        models.CourseJoinRequest.status == "pending",
+    ).order_by(models.CourseJoinRequest.created_at.asc()).all()
+    return {
+        "requests": [{
+            "id": item.id,
+            "user_id": item.user_id,
+            "name": item.user.name,
+            "email": item.user.email,
+            "created_at": item.created_at,
+        } for item in requests]
+    }
+
+
+@router.post("/{course_id}/join-requests/{request_id}")
+def review_course_join_request(
+    course_id: int,
+    request_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    course = db.query(models.Course).filter(models.Course.id == course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    if course.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the course instructor can review join requests")
+
+    join_request = db.query(models.CourseJoinRequest).filter(
+        models.CourseJoinRequest.id == request_id,
+        models.CourseJoinRequest.course_id == course_id,
+        models.CourseJoinRequest.status == "pending",
     ).first()
-    if existing:
-        raise HTTPException(status_code=409, detail="You already joined this course")
-    db.add(models.CourseMember(course_id=course_id, user_id=current_user.id, role="student"))
+    if not join_request:
+        raise HTTPException(status_code=404, detail="Pending course join request not found")
+
+    action = str(payload.get("action") or "").strip().lower()
+    if action not in {"approve", "reject"}:
+        raise HTTPException(status_code=400, detail="Action must be approve or reject")
+
+    if action == "approve":
+        membership = db.query(models.CourseMember).filter(
+            models.CourseMember.course_id == course_id,
+            models.CourseMember.user_id == join_request.user_id,
+        ).first()
+        if not membership:
+            db.add(models.CourseMember(course_id=course_id, user_id=join_request.user_id, role="student"))
+        join_request.status = "approved"
+        message = f"Your request to join '{course.name}' was approved."
+    else:
+        join_request.status = "rejected"
+        message = f"Your request to join '{course.name}' was declined."
+
+    join_request.reviewed_at = datetime.now(timezone.utc)
+    db.add(models.Notification(
+        user_id=join_request.user_id,
+        notification_type="course_join_result",
+        title="Course join request update",
+        body=message,
+        actor_id=current_user.id,
+        actor_name=current_user.name,
+    ))
     db.commit()
-    return serialize_course(db, course, current_user.id)
+    return {"status": join_request.status, "course_id": course_id}
 
 
 @router.post("/{course_id}/leave")

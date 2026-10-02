@@ -308,22 +308,3 @@ Answer phase: give brief accurate feedback on the student's answer, then offer o
     )
 
 
-@router.post("/brainstorm/complete")
-def complete_brainstorm(
-    payload: schemas.BrainstormCompleteRequest,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    today = datetime.now(timezone.utc).date().isoformat()
-    completed_today = db.query(models.LearningActivity).filter(
-        models.LearningActivity.user_id == current_user.id,
-        models.LearningActivity.activity_type == "brainstorm_complete",
-        models.LearningActivity.created_at >= datetime.fromisoformat(today).replace(tzinfo=timezone.utc),
-    ).count()
-    reward = 10 if completed_today == 0 else 0
-    activity, created = award_activity(
-        db, current_user, activity_type="brainstorm_complete", topic=payload.topic,
-        event_key=f"brainstorm:{current_user.id}:{payload.session_id}", xp=reward,
-    )
-    db.commit()
-    return {"xp_earned": activity.xp_earned if created else 0, "detail": "Quick Brainstorm completed"}

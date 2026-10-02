@@ -81,6 +81,14 @@ async def ai_chat(
     """
     try:
         groq_service = await get_groq_service()
+
+        app_context = request.app_context if isinstance(request.app_context, dict) else {}
+        feature = app_context.get("feature")
+        if request.screen_name in {"Quiz", "QuizMain", "AI Quiz"}:
+            raise HTTPException(
+                status_code=400,
+                detail="Quiz mode only supports generating and completing quizzes.",
+            )
         
         # Build message history
         messages = []
@@ -107,7 +115,12 @@ async def ai_chat(
                 else MOCK_USER_DATA["pastActivity"]
             ),
         }
-        system_prompt = build_voice_assistant_prompt(user_data)
+        if feature == "brainstorm_game":
+            system_prompt = """You are EVA in a question-game-only mode. You may only run the current brainstorming round: ask one concise question or challenge, or briefly respond to the player's submitted answer and continue the game. Do not generate quizzes, meeting notes, study plans, or general assistant answers. If asked for something outside the game, politely redirect to the current question game. Never reveal a challenge's answer before the player responds."""
+        elif request.screen_name == "MeetingNotes":
+            system_prompt = """You are EVA in meeting-notes-only mode. Produce concise, structured meeting notes only from the transcript included in the user's message. Include topic, summary, key discussion points, decisions, action items, and follow-ups. Do not answer unrelated questions, invent facts, or add content that is not supported by the transcript."""
+        else:
+            system_prompt = build_voice_assistant_prompt(user_data)
         
         # Get AI response
         ai_response = await groq_service.chat(

@@ -222,6 +222,3 @@ class BrainstormTurnResponse(BaseModel):
     completed: bool = False
 
 
-class BrainstormCompleteRequest(BaseModel):
-    session_id: str = Field(min_length=8, max_length=100)
-    topic: str = Field(min_length=1, max_length=200)
