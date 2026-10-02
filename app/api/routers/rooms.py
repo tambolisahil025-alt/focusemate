@@ -61,10 +61,15 @@ def create_room(room: schemas.RoomCreate, db: Session = Depends(get_db), current
 
 @router.get("/my", response_model=List[schemas.RoomResponse])
 def get_my_rooms(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    rooms = db.query(models.Room, func.count(models.RoomMember.id).label("member_count"))\
+    member_counts = db.query(
+        models.RoomMember.room_id.label("room_id"),
+        func.count(models.RoomMember.id).label("member_count"),
+    ).group_by(models.RoomMember.room_id).subquery()
+    rooms = db.query(models.Room, member_counts.c.member_count)\
         .join(models.RoomMember, models.Room.id == models.RoomMember.room_id)\
+        .join(member_counts, member_counts.c.room_id == models.Room.id)\
         .filter(models.RoomMember.user_id == current_user.id)\
-        .group_by(models.Room.id).all()
+        .distinct().all()
     
     result = []
     for room, count in rooms:
