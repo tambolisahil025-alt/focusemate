@@ -3,18 +3,139 @@ AI Assistant API Routes for StudySpace
 Provides AI chat, suggestions, and context-aware help
 """
 
+from datetime import datetime, timezone
+from typing import List, Optional
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.schemas import schemas
-from app.api.deps import get_db, get_optional_current_user
+from app.api.deps import get_db, get_current_user, get_optional_current_user
 from app.db import models
 from app.services.groq_service import get_groq_service
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ai", tags=["ai-assistant"])
+
+
+class AIHistoryMessage(BaseModel):
+    role: str
+    content: str
+    createdAt: Optional[datetime] = None
+
+
+class AIHistorySessionPayload(BaseModel):
+    id: str = Field(min_length=1, max_length=100)
+    title: str = Field(default="New AI chat", max_length=200)
+    createdAt: Optional[datetime] = None
+    updatedAt: Optional[datetime] = None
+    messages: List[AIHistoryMessage] = Field(default_factory=list)
+
+
+def _serialize_ai_history_session(session):
+    return {
+        "id": session.session_id,
+        "title": session.title,
+        "createdAt": session.created_at.isoformat() if session.created_at else None,
+        "updatedAt": session.updated_at.isoformat() if session.updated_at else None,
+        "messages": session.messages or [],
+    }
+
+
+def _utc_datetime(value):
+    if value is None:
+        return datetime.now(timezone.utc)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _upsert_ai_history_session(db: Session, user_id: int, payload: AIHistorySessionPayload):
+    session = db.query(models.AIChatSession).filter(
+        models.AIChatSession.user_id == user_id,
+        models.AIChatSession.session_id == payload.id,
+    ).first()
+    now = datetime.now(timezone.utc)
+    created_at = _utc_datetime(payload.createdAt) if payload.createdAt else now
+    updated_at = _utc_datetime(payload.updatedAt) if payload.updatedAt else now
+    messages = [
+        {
+            "role": item.role if item.role in ("user", "assistant") else "user",
+            "content": item.content[:20000],
+            "createdAt": item.createdAt.isoformat() if item.createdAt else None,
+        }
+        for item in payload.messages[-200:]
+        if item.role in ("user", "assistant")
+    ]
+
+    if session and session.updated_at and _utc_datetime(session.updated_at) > updated_at:
+        return session
+    if not session:
+        session = models.AIChatSession(user_id=user_id, session_id=payload.id)
+        db.add(session)
+
+    session.title = payload.title[:200] or "New AI chat"
+    session.messages = messages
+    session.created_at = created_at
+    session.updated_at = updated_at
+    return session
+
+
+@router.get("/history")
+def get_ai_history(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    sessions = db.query(models.AIChatSession).filter(
+        models.AIChatSession.user_id == current_user.id
+    ).order_by(models.AIChatSession.updated_at.desc()).limit(50).all()
+    return [_serialize_ai_history_session(session) for session in sessions]
+
+
+@router.post("/history/sync")
+def sync_ai_history(
+    payloads: List[AIHistorySessionPayload],
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    for payload in payloads[:50]:
+        _upsert_ai_history_session(db, current_user.id, payload)
+    db.commit()
+    sessions = db.query(models.AIChatSession).filter(
+        models.AIChatSession.user_id == current_user.id
+    ).order_by(models.AIChatSession.updated_at.desc()).limit(50).all()
+    return [_serialize_ai_history_session(session) for session in sessions]
+
+
+@router.put("/history/{session_id}")
+def upsert_ai_history(
+    session_id: str,
+    payload: AIHistorySessionPayload,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    if session_id != payload.id:
+        raise HTTPException(status_code=400, detail="Session ID does not match the request path.")
+    session = _upsert_ai_history_session(db, current_user.id, payload)
+    db.commit()
+    db.refresh(session)
+    return _serialize_ai_history_session(session)
+
+
+@router.delete("/history/{session_id}")
+def delete_ai_history(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    db.query(models.AIChatSession).filter(
+        models.AIChatSession.user_id == current_user.id,
+        models.AIChatSession.session_id == session_id,
+    ).delete(synchronize_session=False)
+    db.commit()
+    return {"success": True}
 
 # Temporary fallback so prompt personalization can be exercised for guest requests.
 MOCK_USER_DATA = {

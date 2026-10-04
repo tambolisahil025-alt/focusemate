@@ -216,6 +216,19 @@ class LearningActivity(Base):
     event_key = Column(String(200), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
+
+class AIChatSession(Base):
+    __tablename__ = "ai_chat_sessions"
+    __table_args__ = (UniqueConstraint("user_id", "session_id", name="uq_ai_chat_session_user_session"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id = Column(String(100), nullable=False)
+    title = Column(String(200), nullable=False, default="New AI chat")
+    messages = Column(JSON, nullable=False, default=list)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+
 # --- NEW: DIRECT MESSAGES MODEL ---
 class DirectMessage(Base):
     __tablename__ = "direct_messages"
