@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, and_
+from sqlalchemy import or_, and_, func
 from typing import Dict, Any
 from app.db import models
 from app.schemas import schemas  # <-- ADDED THIS IMPORT
@@ -11,6 +11,61 @@ from pydantic import BaseModel
 
 router = APIRouter(tags=["features"])
 logger = logging.getLogger(__name__)
+
+
+@router.get("/leaderboard/learning-progress")
+def get_learning_progress_leaderboard(
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    limit = max(1, min(limit, 100))
+    users = db.query(models.User).order_by(
+        func.coalesce(models.User.xp, 0).desc(),
+        models.User.id.asc(),
+    ).limit(limit).all()
+
+    leaderboard = []
+    current_user_rank = None
+    previous_xp = None
+    for index, user in enumerate(users, start=1):
+        xp = int(user.xp or 0)
+        rank = index if xp != previous_xp else leaderboard[-1]["rank"]
+        leaderboard.append({
+            "id": user.id,
+            "name": user.name,
+            "avatar": user.avatar,
+            "level": int(user.level or 1),
+            "xp": xp,
+            "rank": rank,
+            "is_current_user": user.id == current_user.id,
+        })
+        if user.id == current_user.id:
+            current_user_rank = rank
+        previous_xp = xp
+
+    if current_user_rank is None:
+        current_xp = int(current_user.xp or 0)
+        users_ahead = db.query(models.User.id).filter(
+            func.coalesce(models.User.xp, 0) > current_xp
+        ).count()
+        current_user_rank = users_ahead + 1
+        leaderboard.append({
+            "id": current_user.id,
+            "name": current_user.name,
+            "avatar": current_user.avatar,
+            "level": int(current_user.level or 1),
+            "xp": current_xp,
+            "rank": current_user_rank,
+            "is_current_user": True,
+        })
+
+    return {
+        "leaderboard": leaderboard,
+        "current_user_rank": current_user_rank,
+        "total_users": db.query(models.User.id).count(),
+        "metric": "xp",
+    }
 
 # --- ANALYTICS ---
 @router.get("/analytics/me")
@@ -113,6 +168,23 @@ def get_notifications(unread_only: bool = False, limit: int = 50, db: Session = 
     if unread_only:
         return {"unread_count": len(notifs)}
     return {"notifications": notifs}
+
+
+@router.delete("/notifications/{notification_id}")
+def delete_notification(
+    notification_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    notification = db.query(models.Notification).filter(
+        models.Notification.id == notification_id,
+        models.Notification.user_id == current_user.id,
+    ).first()
+    if not notification:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    db.delete(notification)
+    db.commit()
+    return {"status": "deleted", "notification_id": notification_id}
 
 @router.post("/notifications/read-all")
 def mark_all_read(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
