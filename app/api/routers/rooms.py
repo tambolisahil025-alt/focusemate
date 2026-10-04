@@ -215,6 +215,56 @@ def leave_room(room_id: int, db: Session = Depends(get_db), current_user: models
     db.commit()
     return {"detail": "Successfully left"}
 
+class RoleUpdatePayload(BaseModel):
+    role: str
+
+@router.patch("/{room_id}/members/{user_id}")
+def update_room_member_role(room_id: int, user_id: int, payload: RoleUpdatePayload, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    room = db.query(models.Room).filter(models.Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    if room.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the room owner can update roles")
+    if room.owner_id == user_id:
+        raise HTTPException(status_code=400, detail="Cannot change owner role")
+    
+    membership = get_room_member(db, room_id, user_id)
+    if not membership:
+        raise HTTPException(status_code=404, detail="Member not found")
+        
+    if payload.role not in ["admin", "member"]:
+        raise HTTPException(status_code=400, detail="Invalid role")
+        
+    membership.role = payload.role
+    db.commit()
+    return {"detail": "Role updated"}
+
+@router.delete("/{room_id}/members/{user_id}")
+def remove_room_member(room_id: int, user_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    room = db.query(models.Room).filter(models.Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    if room.owner_id == user_id:
+        raise HTTPException(status_code=400, detail="Cannot remove the owner")
+        
+    current_membership = get_room_member(db, room_id, current_user.id)
+    is_owner = (room.owner_id == current_user.id)
+    is_admin = current_membership and current_membership.role == "admin"
+    
+    if not is_owner and not is_admin:
+        raise HTTPException(status_code=403, detail="You do not have permission to remove members")
+        
+    target_membership = get_room_member(db, room_id, user_id)
+    if not target_membership:
+        raise HTTPException(status_code=404, detail="Member not found")
+        
+    if is_admin and not is_owner and target_membership.role in ["owner", "admin"]:
+        raise HTTPException(status_code=403, detail="Admins cannot remove other admins or owners")
+        
+    db.delete(target_membership)
+    db.commit()
+    return {"detail": "Member removed"}
+
 @router.patch("/{room_id}", response_model=schemas.RoomResponse)
 def update_room(room_id: int, payload: schemas.RoomUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     room = db.query(models.Room).filter(models.Room.id == room_id).first()
