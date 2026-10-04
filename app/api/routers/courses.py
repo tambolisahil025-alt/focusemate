@@ -156,9 +156,11 @@ def create_course(payload: CourseCreate, db: Session = Depends(get_db), current_
     db.add(course)
     db.flush()
     db.add(models.CourseMember(course_id=course.id, user_id=current_user.id, role="instructor"))
-    db.commit()
+    db.flush()
     db.refresh(course)
-    return serialize_course(db, course, current_user.id)
+    response = serialize_course(db, course, current_user.id)
+    db.commit()
+    return response
 
 
 @router.post("/join")
