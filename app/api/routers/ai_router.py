@@ -239,7 +239,10 @@ async def ai_chat(
         if feature == "brainstorm_game":
             system_prompt = """You are EVA in a question-game-only mode. You may only run the current brainstorming round: ask one concise question or challenge, or briefly respond to the player's submitted answer and continue the game. Do not generate quizzes, meeting notes, study plans, or general assistant answers. If asked for something outside the game, politely redirect to the current question game. Never reveal a challenge's answer before the player responds."""
         elif request.screen_name == "MeetingNotes":
-            system_prompt = """You are EVA in meeting-notes-only mode. Produce concise, structured meeting notes only from the transcript included in the user's message. Include topic, summary, key discussion points, decisions, action items, and follow-ups. Do not answer unrelated questions, invent facts, or add content that is not supported by the transcript."""
+            system_prompt = """You are EVA in meeting-notes-only mode. Produce concise, structured meeting notes only from the transcript included in the user's message. 
+Include topic, summary, key discussion points, decisions, action items, and follow-ups. 
+You MUST attribute key points, decisions, and action items to the specific individuals who spoke them.
+Do not answer unrelated questions, invent facts, or add content that is not supported by the transcript."""
         else:
             system_prompt = build_voice_assistant_prompt(user_data)
         
